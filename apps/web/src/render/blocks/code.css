@@ -1,0 +1,92 @@
+/*
+ * Code block and syntax-highlight styles.
+ * Imports the github-dark highlight.js theme, then layers planalot-specific
+ * overrides for the pre/code container and the mermaid diagram container.
+ */
+
+@import "highlight.js/styles/github-dark.css";
+
+/* ── Syntax-highlighted code block ─────────────────────────────────────── */
+
+.hljs-pre {
+  margin: 0.75rem 0;
+  border-radius: 6px;
+  overflow-x: auto;
+  /* github-dark sets background on .hljs; inherit it on the <pre> wrapper */
+  background: #0d1117;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.hljs-pre code.hljs {
+  display: block;
+  padding: 1rem 1.25rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 0.8125rem;   /* 13 px */
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+  /* Let the github-dark theme own color/background; don't override here */
+}
+
+/* Language label shown via data-attribute on the <pre> */
+.hljs-pre[data-language]::before {
+  content: attr(data-language);
+  display: block;
+  padding: 0.3rem 1.25rem;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 0.6875rem;   /* 11 px */
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.35);
+  background: #0d1117;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  user-select: none;
+}
+
+/* ── Mermaid diagram container ─────────────────────────────────────────── */
+
+.mermaid-container {
+  margin: 0.75rem 0;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #0d1117;
+  padding: 1rem;
+  overflow: auto;
+  text-align: center;
+}
+
+/* Let mermaid SVGs fill the container width without overflowing */
+.mermaid-container svg {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ── Mermaid fallback / pending / error states ─────────────────────────── */
+
+.mermaid-pending,
+.mermaid-error {
+  margin: 0.75rem 0;
+}
+
+.mermaid-error-label {
+  display: block;
+  margin-bottom: 0.375rem;
+  font-size: 0.75rem;
+  color: #f87171;   /* red-400 */
+}
+
+.mermaid-fallback {
+  margin: 0;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #0d1117;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas,
+    "Liberation Mono", monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.7);
+}

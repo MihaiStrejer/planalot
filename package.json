@@ -1,0 +1,33 @@
+{
+  "name": "planalot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lightweight local plan conversation daemon and browser UI for agent planning workflows.",
+  "bin": {
+    "planalot": "packages/daemon/dist/cli.js"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @planalot/daemon dev",
+    "build": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex build && pnpm --filter @planalot/web build && pnpm --filter @planalot/daemon build",
+    "typecheck": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex typecheck && pnpm --filter @planalot/web typecheck && pnpm --filter @planalot/daemon typecheck",
+    "check": "pnpm typecheck && pnpm build",
+    "planalot": "node packages/daemon/dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.0.9",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-arm64-msvc": "^4.60.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.0",
+    "typescript": "^5.9.3"
+  }
+}

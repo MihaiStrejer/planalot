@@ -1,0 +1,233 @@
+/*
+ * Left rail: compact plan navigation, file hierarchy, and chapter outline.
+ */
+
+.leftRailHeader {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.leftRailTab,
+.leftRailSectionHeader,
+.leftRailItem,
+.leftRailPlan {
+  appearance: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.leftRailTab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.leftRailTab span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leftRailTab:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.leftRailTab--active {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.leftRailBody {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.leftRailSection + .leftRailSection {
+  border-top: 1px solid var(--border);
+}
+
+.leftRailSectionHeader {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.leftRailSectionHeader:hover {
+  background: var(--surface-muted);
+  color: var(--text-muted);
+}
+
+.leftRailSectionBody {
+  padding: 2px 0 6px;
+}
+
+.leftRailList {
+  display: flex;
+  flex-direction: column;
+}
+
+.leftRailItem {
+  border: 0;
+  border-radius: 0 6px 6px 0;
+  background: transparent;
+  line-height: 1.35;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.leftRailItem:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.leftRailItem__marker {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: transparent;
+  transition: background 140ms ease, transform 140ms ease;
+}
+
+.leftRailItem__fileIcon {
+  flex-shrink: 0;
+  color: var(--text-subtle);
+}
+
+.leftRailItem__text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+.leftRailItem--active {
+  color: var(--accent);
+  background: var(--accent-muted);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.leftRailItem--active .leftRailItem__marker {
+  background: var(--accent);
+  transform: scale(1.3);
+}
+
+.leftRailItem--active .leftRailItem__fileIcon {
+  color: var(--accent);
+}
+
+.leftRailItem--active:hover {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.leftRailPlan {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: calc(100% - 8px);
+  margin: 0 4px 3px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.leftRailPlan:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.leftRailPlan--active {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: var(--accent-muted);
+}
+
+.leftRailPlan__name,
+.leftRailPlan__meta {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.leftRailPlan__name {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.leftRailPlan__meta {
+  color: var(--text-subtle);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.leftRailEmpty {
+  margin: 0;
+  padding: 7px 10px 9px;
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.leftRailTab:focus-visible,
+.leftRailSectionHeader:focus-visible,
+.leftRailItem:focus-visible,
+.leftRailPlan:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+@media (max-width: 900px) {
+  .leftRailHeader {
+    position: static;
+  }
+
+  .leftRailBody {
+    max-height: 220px;
+  }
+
+  .leftRailItem {
+    border-radius: 6px;
+  }
+
+  .leftRailItem__marker {
+    display: none;
+  }
+
+  .leftRailItem--active {
+    box-shadow: none;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+}
