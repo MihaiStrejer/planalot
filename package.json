@@ -2,6 +2,7 @@
   "name": "planalot",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Lightweight local plan conversation daemon and browser UI for agent planning workflows.",
   "bin": {

@@ -72,3 +72,7 @@ codex plugin add planalot@personal
 ```
 
 Then start a new Codex thread and use `$planalot`. The Codex plugin opens Planalot from the current workspace, but feedback from the browser is manual/copyable until Codex exposes a live extension message bridge like Pi's `sendUserMessage`.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
