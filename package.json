@@ -5,6 +5,15 @@
   "license": "Apache-2.0",
   "type": "module",
   "description": "Lightweight local plan conversation daemon and browser UI for agent planning workflows.",
+  "author": "Mihai Strejer",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MihaiStrejer/planalot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MihaiStrejer/planalot/issues"
+  },
+  "homepage": "https://github.com/MihaiStrejer/planalot#readme",
   "bin": {
     "planalot": "packages/daemon/dist/cli.js"
   },
