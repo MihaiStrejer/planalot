@@ -15,13 +15,22 @@ import type {
   FeedbackBatch,
   FeedbackQuestion,
   FeedbackQuestionRequest,
+  FeedbackResult,
+  FeedbackResultRequest,
   FeedbackRequestedRequest,
   FeedbackRequest,
-  HarnessRef,
+  HarnessAttachRequest,
+  HarnessHeartbeatRequest,
   HarnessPresence,
+  HarnessRef,
+  HarnessRole,
+  HarnessStatus,
+  HarnessTransport,
   ImplementPlanRequest,
+  PlanEditLease,
   PlanFeedbackStore,
   PlanFileEntry,
+  PlanFeedbackItem,
   PlanManifest,
   PlanSession,
   PlanStatus,
@@ -44,8 +53,10 @@ import {
   createPlanWorkspace,
   deletePlanFile,
   hasOpenFeedback,
+  layerForPath,
   listPlanFiles,
   listPlans,
+  planLayers,
   readAllPlanFiles,
   readFeedback,
   readManifest,
@@ -58,9 +69,16 @@ import {
   updatePlanFileMetadata,
   updatePlanMetadata,
   upsertPlanFile,
+  validateFeedbackResultShape,
   workspacePath,
+  writeFeedback,
   writeManifest,
 } from "./planStore.js";
+
+interface QueuedEvent {
+  seq: number;
+  event: ServerEvent;
+}
 
 interface HarnessConn {
   harnessId: string;
@@ -68,19 +86,41 @@ interface HarnessConn {
   label: string;
   connectedAt: number;
   lastActiveAt?: number;
-  res: ServerResponse;
+  lastSeenAt: number;
+  status: HarnessStatus;
+  transport: HarnessTransport;
+  /** Held SSE stream for push delivery (Pi); undefined for poll harnesses. */
+  res?: ServerResponse;
+  /** Pending targeted events awaiting pull by a poll harness. */
+  queue: QueuedEvent[];
+  /** Resolver that wakes an in-flight long-poll heartbeat when an event arrives. */
+  waiter?: (() => void) | undefined;
 }
 
 interface SessionRuntime {
   session: PlanSession;
   planId: string;
   clients: Set<ServerResponse>;
-  /** Connected harness instances, keyed by unique-per-instance harnessId. */
+  /** Attached harness instances, keyed by unique-per-instance harnessId. */
   harnesses: Map<string, HarnessConn>;
+  /** Monotonic per-session event sequence powering poll cursors. */
+  eventSeq: number;
+  /** harnessId designated to drive (mirror of manifest.harnesses.main). */
+  driverHarnessId?: string | undefined;
+  /** Active exclusive edit lease while a feedback round is in flight. */
+  editLease?: PlanEditLease | undefined;
   watcher?: FSWatcher;
   watchTimer?: NodeJS.Timeout;
   harnessTimer?: NodeJS.Timeout;
 }
+
+const newRuntime = (session: PlanSession, planId: string): SessionRuntime => ({
+  session,
+  planId,
+  clients: new Set(),
+  harnesses: new Map(),
+  eventSeq: 0,
+});
 
 interface StartDaemonOptions {
   port?: number;
@@ -97,15 +137,49 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
 
   // Keepalive: SSE consumed via fetch streaming (the harness adapters) is
   // terminated by undici's ~5min body timeout when idle. Periodic comment
-  // pings keep long-lived connections (and the harness registry) alive.
+  // pings keep long-lived connections alive, and an open SSE stream counts as
+  // an implicit heartbeat (refreshes the harness's lastSeenAt).
   const heartbeat = setInterval(() => {
+    const now = Date.now();
     for (const runtime of sessions.values()) {
       for (const client of runtime.clients) {
         try { client.write(": ping\n\n"); } catch { /* client gone; close handler cleans up */ }
       }
+      for (const conn of runtime.harnesses.values()) {
+        if (conn.res !== undefined) conn.lastSeenAt = now;
+      }
     }
   }, 25_000);
   heartbeat.unref?.();
+
+  // Presence TTL: flip stale harnesses to "down", then evict; broadcast changes
+  // so the browser reflects connection health. Poll harnesses refresh lastSeenAt
+  // on each heartbeat; SSE harnesses refresh via the keepalive loop above.
+  const prune = setInterval(() => {
+    const now = Date.now();
+    for (const runtime of sessions.values()) {
+      let changed = false;
+      for (const conn of [...runtime.harnesses.values()]) {
+        const age = now - conn.lastSeenAt;
+        if (conn.status === "live" && age > config.harnessDownMs) {
+          // Going unresponsive abandons any edit lease it holds so the plan
+          // unlocks immediately (the open round can be retargeted) rather than
+          // staying locked by a dead harness until eviction.
+          conn.status = "down";
+          releaseLeaseIfHeldBy(runtime, conn.harnessId);
+          changed = true;
+        }
+        if (age > config.harnessEvictMs) {
+          runtime.harnesses.delete(conn.harnessId);
+          conn.waiter?.();
+          releaseLeaseIfHeldBy(runtime, conn.harnessId);
+          changed = true;
+        }
+      }
+      if (changed) broadcastPresence(runtime);
+    }
+  }, Math.max(5_000, Math.floor(config.harnessDownMs / 3)));
+  prune.unref?.();
 
   const authorize = (url: URL): boolean => timingSafeTokenEqual(url.searchParams.get("token"), token);
   const authorizeHeader = (req: { headers: Record<string, string | string[] | undefined> }): boolean => {
@@ -120,23 +194,48 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
   };
 
   const emit = (runtime: SessionRuntime, event: ServerEvent): void => {
+    const seq = ++runtime.eventSeq;
+    // Push to all held streams (browser + SSE harnesses).
     for (const client of runtime.clients) writeEvent(client, event);
+    // Targeted events also queue for the addressed poll harness (no held stream),
+    // and wake any in-flight long-poll heartbeat it has open.
+    const target = (event as { targetHarnessId?: string }).targetHarnessId;
+    if (target) {
+      const conn = runtime.harnesses.get(target);
+      if (conn && conn.res === undefined) {
+        conn.queue.push({ seq, event });
+        if (conn.queue.length > 256) conn.queue.splice(0, conn.queue.length - 256);
+        conn.waiter?.();
+      }
+    }
   };
 
   const presenceList = (runtime: SessionRuntime): HarnessPresence[] =>
-    Array.from(runtime.harnesses.values()).map(({ res: _res, ...rest }) => rest);
+    Array.from(runtime.harnesses.values()).map((c) => ({
+      harnessId: c.harnessId,
+      harnessType: c.harnessType,
+      label: c.label,
+      connectedAt: c.connectedAt,
+      ...(c.lastActiveAt !== undefined ? { lastActiveAt: c.lastActiveAt } : {}),
+      lastSeenAt: c.lastSeenAt,
+      status: c.status,
+      transport: c.transport,
+      isDriver: c.harnessId === runtime.driverHarnessId,
+    }));
 
   /**
-   * Resolve which connected harness feedback should route to:
-   * user-chosen (if connected) → last-active (if connected) → most-recently-active
-   * among connected → most-recently-connected → none.
+   * Resolve which live harness feedback should route to:
+   * user-chosen → driver → last-active → most-recently-active → most-recently-
+   * attached → none. Only "live" harnesses are eligible.
    */
   const resolveTargetId = (runtime: SessionRuntime, chosen?: string): string | undefined => {
     const conns = runtime.harnesses;
-    if (chosen && conns.has(chosen)) return chosen;
+    const live = (id?: string): boolean => id !== undefined && conns.get(id)?.status === "live";
+    if (chosen && live(chosen)) return chosen;
+    if (live(runtime.driverHarnessId)) return runtime.driverHarnessId;
     const last = runtime.session.lastActiveHarnessId;
-    if (last && conns.has(last)) return last;
-    const arr = Array.from(conns.values());
+    if (live(last)) return last;
+    const arr = Array.from(conns.values()).filter((c) => c.status === "live");
     if (arr.length === 0) return undefined;
     const active = arr.filter((c) => c.lastActiveAt !== undefined).sort((a, b) => (b.lastActiveAt ?? 0) - (a.lastActiveAt ?? 0));
     if (active.length) return active[0]!.harnessId;
@@ -150,6 +249,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
       sessionId: runtime.session.id,
       harnesses: presenceList(runtime),
       ...(targetHarnessId ? { targetHarnessId } : {}),
+      ...(runtime.editLease ? { editLease: runtime.editLease } : {}),
     };
   };
 
@@ -162,6 +262,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
       messages: [],
       harnesses: presenceList(runtime),
       ...(targetHarnessId ? { targetHarnessId } : {}),
+      ...(runtime.editLease ? { editLease: runtime.editLease } : {}),
     };
   };
 
@@ -207,6 +308,48 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
     return conn ? harnessRefFromConn(conn) : undefined;
   };
 
+  const harnessIdHeader = (req: { headers: Record<string, string | string[] | undefined> }): string | undefined => {
+    const value = req.headers["x-planalot-harness-id"];
+    return typeof value === "string" && value ? value : undefined;
+  };
+
+  /**
+   * Enforce the single-writer invariant. Returns a 409 body when `harnessId`
+   * may not mutate the plan: while a feedback round holds the edit lease, only
+   * the addressed harness(es) may write; outside a round, only a live driver
+   * may write (if one is designated). Returns null when the write is allowed.
+   */
+  const editLeaseViolation = (
+    runtime: SessionRuntime | undefined,
+    harnessId: string | undefined,
+  ): { error: string; holder: string[]; feedbackRequestId?: string } | null => {
+    if (!runtime) return null;
+    const lease = runtime.editLease;
+    if (lease) {
+      if (harnessId && lease.holderHarnessIds.includes(harnessId)) return null;
+      return {
+        error: "Plan is locked to the addressed harness for the active feedback round.",
+        holder: lease.holderHarnessIds,
+        feedbackRequestId: lease.feedbackRequestId,
+      };
+    }
+    const driverId = runtime.driverHarnessId;
+    if (driverId) {
+      const driver = runtime.harnesses.get(driverId);
+      if (driver && driver.status === "live" && harnessId !== driverId) {
+        return { error: "Plan edits are restricted to the driver harness.", holder: [driverId] };
+      }
+    }
+    return null;
+  };
+
+  const releaseLeaseIfHeldBy = (runtime: SessionRuntime, harnessId: string): void => {
+    const lease = runtime.editLease;
+    if (!lease) return;
+    const holders = lease.holderHarnessIds.filter((id) => id !== harnessId);
+    runtime.editLease = holders.length === 0 ? undefined : { ...lease, holderHarnessIds: holders };
+  };
+
   const normalizeSession = (session: PlanSession): PlanSession => {
     session.versions ??= [createInitialVersion(session.currentPlanText, session.currentPlanHash, Date.now())];
     session.feedbackBatches ??= [];
@@ -219,7 +362,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
     if (existing) return existing;
     try {
       const session = normalizeSession(JSON.parse(await readFile(sessionPath(id), "utf8")) as PlanSession);
-      const runtime: SessionRuntime = { session, planId: session.id, clients: new Set(), harnesses: new Map() };
+      let driverId: string | undefined;
+      try {
+        const manifest = await readManifest(id);
+        session.cwd = workspacePath(manifest.id);
+        session.absolutePlanPath = planFilePath(manifest.id, manifest.mainFile);
+        session.planFile = manifest.name;
+        driverId = manifest.harnesses.main?.id;
+      } catch {
+        // Keep the persisted session shape if no plan manifest is available.
+      }
+      const runtime = newRuntime(session, session.id);
+      runtime.driverHarnessId = driverId;
       await attachWatcher(runtime);
       sessions.set(id, runtime);
       return runtime;
@@ -227,7 +381,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
       try {
         const manifest = await readManifest(id);
         const session = normalizeSession(await sessionFromPlan(manifest));
-        const runtime: SessionRuntime = { session, planId: manifest.id, clients: new Set(), harnesses: new Map() };
+        const runtime = newRuntime(session, manifest.id);
+        runtime.driverHarnessId = manifest.harnesses.main?.id;
         await attachWatcher(runtime);
         sessions.set(id, runtime);
         return runtime;
@@ -317,7 +472,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         createdAt: Date.now(),
       },
     ];
-    const runtime: SessionRuntime = { session, planId: manifest.id, clients: new Set(), harnesses: new Map() };
+    const runtime = newRuntime(session, manifest.id);
+    runtime.driverHarnessId = manifest.harnesses.main?.id;
     await attachWatcher(runtime);
     sessions.set(manifest.id, runtime);
     await persist(session);
@@ -346,7 +502,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
   const notifyFileChanged = async (planId: string, filePath: string): Promise<void> => {
     const runtime = sessions.get(planId);
     if (!runtime) return;
-    if (filePath === "index.md") {
+    const manifest = await readManifest(planId);
+    if (filePath === manifest.mainFile) {
       const text = await readFile(runtime.session.absolutePlanPath, "utf8");
       const hash = contentHash(text);
       if (hash !== runtime.session.currentPlanHash) {
@@ -361,6 +518,189 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
       }
     }
     emit(runtime, { type: "file.changed", sessionId: planId, filePath });
+  };
+
+  const createFeedbackItems = async (
+    planId: string,
+    body: FeedbackRequest,
+    targetHarness?: HarnessRef,
+  ): Promise<PlanFeedbackItem[]> => {
+    const base = {
+      kind: body.kind,
+      ...(body.filePath ? { filePath: body.filePath } : {}),
+      ...(body.layer ? { layer: body.layer } : {}),
+      ...(body.targetHarnessId ? { targetHarnessId: body.targetHarnessId } : {}),
+    } satisfies Omit<AddPlanFeedbackRequest, "text">;
+    const annotations = Array.isArray(body.annotations) && body.annotations.length ? body.annotations : undefined;
+    if (!annotations) {
+      return [await addPlanFeedback(planId, { ...base, text: body.message }, targetHarness)];
+    }
+
+    const items: PlanFeedbackItem[] = [];
+    for (const annotation of annotations) {
+      const text = [
+        annotation.comment?.trim() || annotation.label?.trim() || "Annotated feedback",
+        body.message.trim() ? `\nSession note:\n${body.message.trim()}` : "",
+      ].filter(Boolean).join("\n");
+      items.push(await addPlanFeedback(planId, { ...base, text, annotations: [annotation] }, targetHarness));
+    }
+    if (body.message.trim() && items.length === 0) {
+      items.push(await addPlanFeedback(planId, { ...base, text: body.message }, targetHarness));
+    }
+    return items;
+  };
+
+  const createFeedbackSession = async (
+    planId: string,
+    items: PlanFeedbackItem[],
+    feedbackSessionId: string,
+    requestMarkdown: string,
+  ): Promise<NonNullable<PlanFeedbackStore["sessions"]>[number]> => {
+    const store = await readFeedback(planId);
+    store.sessions ??= [];
+    const now = new Date().toISOString();
+    const session = {
+      id: feedbackSessionId,
+      feedbackItemIds: items.map((item) => item.id),
+      status: "open" as const,
+      createdAt: now,
+      updatedAt: now,
+      requestMarkdown,
+    };
+    store.sessions.push(session);
+    for (const item of store.items) {
+      if (!session.feedbackItemIds.includes(item.id)) continue;
+      item.feedbackSessionIds ??= [];
+      if (!item.feedbackSessionIds.includes(session.id)) item.feedbackSessionIds.push(session.id);
+      item.updatedAt = now;
+    }
+    await writeFeedback(planId, store);
+    return session;
+  };
+
+  const applyFeedbackResult = async (runtime: SessionRuntime, rawResult: FeedbackResult): Promise<unknown> => {
+    const store = await readFeedback(runtime.planId);
+    store.sessions ??= [];
+    store.responses ??= [];
+    const feedbackSessionId = typeof rawResult?.feedbackSessionId === "string" ? rawResult.feedbackSessionId : "";
+    const session = store.sessions.find((candidate) => candidate.id === feedbackSessionId);
+    if (!session) throw new Error("feedback session not found");
+    const validIds = new Set(session.feedbackItemIds);
+    const now = new Date().toISOString();
+
+    let result: FeedbackResult;
+    try {
+      result = validateFeedbackResultShape(rawResult, session.id, validIds);
+    } catch (error) {
+      session.status = "result-invalid";
+      session.error = error instanceof Error ? error.message : String(error);
+      session.updatedAt = now;
+      for (const item of store.items) {
+        if (validIds.has(item.id)) {
+          item.status = "result-invalid";
+          item.updatedAt = now;
+        }
+      }
+      await writeFeedback(runtime.planId, store);
+      return { ok: false, error: session.error, feedbackSession: session };
+    }
+
+    const changedIds = new Set<string>();
+    for (const change of result.fileChanges ?? []) {
+      for (const id of change.feedbackItemIds ?? []) changedIds.add(id);
+      if (change.operation === "deleted") {
+        await deletePlanFile(runtime.planId, change.path);
+        await notifyFileChanged(runtime.planId, change.path);
+        continue;
+      }
+      if (change.content !== undefined) {
+        await upsertPlanFile(runtime.planId, { path: change.path, content: change.content });
+        await notifyFileChanged(runtime.planId, change.path);
+      } else if (change.alreadyApplied === true) {
+        await notifyFileChanged(runtime.planId, change.path);
+      }
+    }
+
+    const followUpIds = new Set<string>();
+    const addressedByResponseIds = new Set<string>();
+    const followUpRequests: FeedbackQuestionRequest[] = [];
+    for (const response of result.responses ?? []) {
+      store.responses.push(response);
+      if (response.expectsUserFollowUp && response.kind === "question") {
+        const request: FeedbackQuestionRequest = {
+          id: response.id,
+          planVersionId: latestVersion(runtime.session).id,
+          questions: [
+            {
+              id: response.id,
+              kind: response.suggestedAnswers?.length ? "single-select" : "text",
+              prompt: response.text,
+              required: true,
+              ...(response.suggestedAnswers?.length
+                ? {
+                    suggestions: response.suggestedAnswers.map((answer) => ({
+                      id: answer.id,
+                      label: answer.label,
+                      description: answer.description ?? answer.label,
+                    })),
+                  }
+                : {}),
+            },
+          ],
+          status: "requested",
+          createdAt: Date.now(),
+        };
+        if (!runtime.session.feedbackRequests.some((candidate) => candidate.id === request.id)) {
+          runtime.session.feedbackRequests.push(request);
+          followUpRequests.push(request);
+        }
+      }
+      for (const id of response.feedbackItemIds ?? []) {
+        addressedByResponseIds.add(id);
+        if (response.expectsUserFollowUp) followUpIds.add(id);
+        const item = store.items.find((candidate) => candidate.id === id);
+        if (item) {
+          item.responseIds ??= [];
+          if (!item.responseIds.includes(response.id)) item.responseIds.push(response.id);
+        }
+      }
+    }
+
+    const sessionHasUnscopedFollowUp = (result.responses ?? []).some((response) => response.expectsUserFollowUp && !response.feedbackItemIds?.length);
+    for (const item of store.items) {
+      if (!validIds.has(item.id)) continue;
+      if (followUpIds.has(item.id)) {
+        item.status = "needs-clarification";
+      } else if (changedIds.has(item.id) || addressedByResponseIds.has(item.id)) {
+        item.status = "resolved";
+        item.resolvedAt = now;
+      }
+      item.updatedAt = now;
+    }
+
+    const unresolved = store.items.some((item) =>
+      validIds.has(item.id) && (item.status === "open" || item.status === "needs-clarification" || item.status === "result-invalid")
+    );
+    session.status = unresolved || sessionHasUnscopedFollowUp ? "open" : "closed";
+    session.result = result;
+    delete session.error;
+    session.updatedAt = now;
+    await writeFeedback(runtime.planId, store);
+    // Round closed → release the exclusive edit lease bound to it.
+    if (session.status === "closed" && runtime.editLease?.feedbackRequestId === session.id) {
+      runtime.editLease = undefined;
+      broadcastPresence(runtime);
+    }
+    if (followUpRequests.length > 0) {
+      runtime.session.updatedAt = Date.now();
+      await persist(runtime.session);
+      for (const request of followUpRequests) emit(runtime, { type: "feedback.requested", sessionId: runtime.session.id, request });
+    }
+
+    for (const item of store.items) {
+      if (validIds.has(item.id)) emit(runtime, { type: "feedback.updated", sessionId: runtime.session.id, feedback: item });
+    }
+    return { ok: true, feedbackSession: session };
   };
 
   const parseStatusList = (value: string | null): PlanStatus[] | undefined => {
@@ -415,10 +755,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         return methodNotAllowed(res);
       }
 
-      const planFileMatch = url.pathname.match(/^\/plans\/([^/]+)\/files(?:\/([^/]+))?$/);
+      const planFileMatch = url.pathname.match(/^\/plans\/([^/]+)\/files(?:\/(.+))?$/);
       if (planFileMatch) {
         const id = planFileMatch[1] ?? "";
-        const filePath = planFileMatch[2];
+        const filePath = planFileMatch[2] ? decodeURIComponent(planFileMatch[2]) : undefined;
         if (!authorize(url) && !authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
 
         if (filePath === undefined) {
@@ -428,6 +768,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
           }
           if (req.method === "POST") {
             if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+            const violation = editLeaseViolation(sessions.get(id), harnessIdHeader(req));
+            if (violation) return sendJson(res, violation, 409);
             const body = await readJsonBody<UpsertPlanFileRequest>(req);
             const entry = await upsertPlanFile(id, body);
             await notifyFileChanged(id, entry.path);
@@ -444,6 +786,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         }
         if (req.method === "PUT") {
           if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+          const violation = editLeaseViolation(sessions.get(id), harnessIdHeader(req));
+          if (violation) return sendJson(res, violation, 409);
           const body = await readJsonBody<{ content: string }>(req);
           const current = await readPlanFile(id, filePath).catch(() => undefined);
           const entry = await upsertPlanFile(id, {
@@ -464,6 +808,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         }
         if (req.method === "DELETE") {
           if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+          const violation = editLeaseViolation(sessions.get(id), harnessIdHeader(req));
+          if (violation) return sendJson(res, violation, 409);
           sendJson(res, { manifest: await deletePlanFile(id, filePath) });
           return;
         }
@@ -529,7 +875,126 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         const target = body.harnessId ? runtime.harnesses.get(body.harnessId) : undefined;
         if (!target) return sendJson(res, { error: "Harness not connected" }, 404);
         const manifest = await setMainHarness(id, harnessRefFromConn(target));
+        runtime.driverHarnessId = target.harnessId;
+        broadcastPresence(runtime);
         sendJson(res, { manifest });
+        return;
+      }
+
+      // Explicit attach / heartbeat / detach lifecycle for poll-based harnesses
+      // (Claude Code, Codex). Presence is governed by this lifecycle + a TTL,
+      // decoupled from any held stream. SSE harnesses (Pi) keep using /events.
+      const harnessLifecycleMatch = url.pathname.match(/^\/plans\/([^/]+)\/harness\/(?:([^/]+)\/)?(attach|heartbeat|detach)$/);
+      if (harnessLifecycleMatch) {
+        const id = harnessLifecycleMatch[1] ?? "";
+        const hid = harnessLifecycleMatch[2];
+        const action = harnessLifecycleMatch[3];
+        if (req.method !== "POST") return methodNotAllowed(res);
+        if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+        const runtime = await loadSession(id);
+        if (!runtime) return sendJson(res, { error: "Plan not found" }, 404);
+
+        if (action === "attach") {
+          const body = await readJsonBody<HarnessAttachRequest>(req).catch(() => ({} as HarnessAttachRequest));
+          const harnessId = (typeof body.harnessId === "string" && body.harnessId) || randomUUID();
+          const harnessType = isRuntime(body.harnessType) ? body.harnessType : runtime.session.runtime;
+          const now = Date.now();
+          const existing = runtime.harnesses.get(harnessId);
+          // Name: explicit (provided) wins; else keep an existing name across
+          // reconnects; else assign a friendly name unique among live harnesses.
+          const providedLabel = typeof body.label === "string" && body.label.trim() ? body.label.trim() : undefined;
+          const label = providedLabel ?? existing?.label ?? (() => {
+            const taken = new Set(Array.from(runtime.harnesses.values()).map((c) => c.label));
+            for (let i = 0; i < 25; i += 1) {
+              const candidate = generateHarnessName();
+              if (!taken.has(candidate)) return candidate;
+            }
+            return `${generateHarnessName()}-${Math.floor(Math.random() * 1000)}`;
+          })();
+          const conn: HarnessConn = existing ?? {
+            harnessId, harnessType, label,
+            connectedAt: now, lastSeenAt: now, status: "live", transport: "poll", queue: [],
+          };
+          conn.harnessType = harnessType;
+          conn.label = label;
+          conn.lastSeenAt = now;
+          conn.status = "live";
+          if (conn.res === undefined) conn.transport = "poll";
+          runtime.harnesses.set(harnessId, conn);
+
+          // Honor a drive request only when no live driver is already designated.
+          const currentDriver = runtime.driverHarnessId ? runtime.harnesses.get(runtime.driverHarnessId) : undefined;
+          if (body.drive === true && (!runtime.driverHarnessId || currentDriver?.status !== "live")) {
+            runtime.driverHarnessId = harnessId;
+            await setMainHarness(id, harnessRefFromConn(conn));
+          }
+          await setPlanHarnessActive(id, harnessRefFromConn(conn));
+          broadcastPresence(runtime);
+          const role: HarnessRole = runtime.driverHarnessId === harnessId ? "driver" : "peer";
+          sendJson(res, {
+            harnessId,
+            label,
+            role,
+            roster: presenceList(runtime),
+            cursor: runtime.eventSeq,
+            ...(runtime.editLease ? { editLease: runtime.editLease } : {}),
+          });
+          return;
+        }
+
+        if (!hid) return sendJson(res, { error: "harness id is required" }, 400);
+        const conn = runtime.harnesses.get(hid);
+
+        if (action === "detach") {
+          if (conn) {
+            runtime.harnesses.delete(hid);
+            conn.waiter?.();
+            releaseLeaseIfHeldBy(runtime, hid);
+            broadcastPresence(runtime);
+          }
+          sendJson(res, { ok: true });
+          return;
+        }
+
+        // action === "heartbeat": refresh liveness and long-poll for events.
+        if (!conn) return sendJson(res, { error: "Harness not attached", reattach: true }, 404);
+        const body = await readJsonBody<HarnessHeartbeatRequest>(req).catch(() => ({} as HarnessHeartbeatRequest));
+        conn.lastSeenAt = Date.now();
+        conn.status = "live";
+        const cursor = typeof body.cursor === "number" ? body.cursor : 0;
+        const waitMs = Math.max(0, Math.min(Number(body.waitMs) || 0, config.longPollMs));
+        const drain = (): QueuedEvent[] => conn.queue.filter((q) => q.seq > cursor);
+
+        let pending = drain();
+        if (pending.length === 0 && waitMs > 0) {
+          pending = await new Promise<QueuedEvent[]>((resolve) => {
+            let settled = false;
+            const finish = (items: QueuedEvent[]): void => {
+              if (settled) return;
+              settled = true;
+              conn.waiter = undefined;
+              clearTimeout(timer);
+              resolve(items);
+            };
+            const timer = setTimeout(() => finish([]), waitMs);
+            timer.unref?.();
+            conn.waiter = () => finish(drain());
+            req.once("close", () => finish([]));
+          });
+          conn.lastSeenAt = Date.now();
+        }
+
+        const maxSeq = pending.length ? pending[pending.length - 1]!.seq : cursor;
+        conn.queue = conn.queue.filter((q) => q.seq > maxSeq);
+        const role: HarnessRole = runtime.driverHarnessId === hid ? "driver" : "peer";
+        sendJson(res, {
+          harnessId: hid,
+          role,
+          roster: presenceList(runtime),
+          events: pending.map((q) => q.event),
+          cursor: maxSeq,
+          ...(runtime.editLease ? { editLease: runtime.editLease } : {}),
+        });
         return;
       }
 
@@ -575,7 +1040,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             const harnessType = isRuntime(declaredType) ? declaredType : runtime.session.runtime;
             const label = url.searchParams.get("label") || harnessType;
             const connectedAt = Date.now();
-            runtime.harnesses.set(harnessId, { harnessId, harnessType, label, connectedAt, res });
+            runtime.harnesses.set(harnessId, {
+              harnessId,
+              harnessType,
+              label,
+              connectedAt,
+              lastSeenAt: connectedAt,
+              status: "live",
+              transport: "sse",
+              res,
+              queue: [],
+            });
             await setPlanHarnessActive(id, { id: harnessId, type: harnessType, label, connectedAt: new Date(connectedAt).toISOString() });
             broadcastPresence(runtime);
           } else {
@@ -585,6 +1060,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             runtime.clients.delete(res);
             if (harnessId && runtime.harnesses.get(harnessId)?.res === res) {
               runtime.harnesses.delete(harnessId);
+              releaseLeaseIfHeldBy(runtime, harnessId);
               broadcastPresence(runtime);
             }
           });
@@ -655,7 +1131,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         return;
       }
 
-      const sessionMatch = url.pathname.match(/^\/sessions\/([^/]+)(?:\/(events|feedback|agent-message|feedback-requested|feedback-answered|plan-updated|accept|build))?$/);
+      const sessionMatch = url.pathname.match(/^\/sessions\/([^/]+)(?:\/(events|feedback|feedback-result|agent-message|feedback-requested|feedback-answered|plan-updated|accept|build))?$/);
       if (sessionMatch) {
         const id = sessionMatch[1] ?? "";
         const action = sessionMatch[2];
@@ -687,7 +1163,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             const harnessType = isRuntime(declaredType) ? declaredType : runtime.session.runtime;
             const label = url.searchParams.get("label") || harnessType;
             const connectedAt = Date.now();
-            runtime.harnesses.set(harnessId, { harnessId, harnessType, label, connectedAt, res });
+            runtime.harnesses.set(harnessId, {
+              harnessId,
+              harnessType,
+              label,
+              connectedAt,
+              lastSeenAt: connectedAt,
+              status: "live",
+              transport: "sse",
+              res,
+              queue: [],
+            });
             await setPlanHarnessActive(runtime.planId, { id: harnessId, type: harnessType, label, connectedAt: new Date(connectedAt).toISOString() });
             broadcastPresence(runtime);
           } else {
@@ -699,6 +1185,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             runtime.clients.delete(res);
             if (harnessId && runtime.harnesses.get(harnessId)?.res === res) {
               runtime.harnesses.delete(harnessId);
+              releaseLeaseIfHeldBy(runtime, harnessId);
               broadcastPresence(runtime);
             }
           });
@@ -715,34 +1202,36 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
           const annotations = Array.isArray(body.annotations) && body.annotations.length ? body.annotations : undefined;
           const chosen = typeof body.targetHarnessId === "string" ? body.targetHarnessId : undefined;
           const targetId = resolveTargetId(runtime, chosen);
+          const manifest = await readManifest(runtime.planId);
+          const feedbackItems = await createFeedbackItems(runtime.planId, body, resolveHarnessRef(runtime, chosen));
+          for (const feedback of feedbackItems) emit(runtime, { type: "feedback.added", sessionId: id, feedback });
+          const feedbackSessionId = `fs_${randomUUID()}`;
+          const requestMarkdown = buildFeedbackRequestMarkdown(manifest, feedbackItems, feedbackSessionId);
+          const feedbackSession = await createFeedbackSession(runtime.planId, feedbackItems, feedbackSessionId, requestMarkdown);
           const message: ConversationMessage = {
             id: randomUUID(),
             role: "user",
             kind: body.kind,
-            text: body.message,
+            text: requestMarkdown,
             ...(annotations === undefined ? {} : { annotations }),
             createdAt: Date.now(),
           };
           const batch = createFeedbackBatch(runtime.session, message);
           runtime.session.messages.push(message);
           runtime.session.feedbackBatches.push(batch);
-          const feedback = await addPlanFeedback(runtime.planId, {
-            kind: body.kind,
-            text: body.message,
-            ...(annotations === undefined ? {} : { annotations }),
-            ...(chosen ? { targetHarnessId: chosen } : {}),
-          }, resolveHarnessRef(runtime, chosen));
-          emit(runtime, { type: "feedback.added", sessionId: id, feedback });
 
           if (targetId) {
-            // A connected harness owns this send — deliver only to it (tagged).
+            // A connected harness owns this send — deliver only to it (tagged),
+            // and lease the plan's edit rights exclusively to it for this round.
+            runtime.editLease = { holderHarnessIds: [targetId], feedbackRequestId: feedbackSessionId, grantedAt: Date.now() };
             runtime.session.status = "agent-processing";
             runtime.session.updatedAt = Date.now();
             await persist(runtime.session);
             emit(runtime, { type: "feedback.sent", sessionId: id, message, batch, targetHarnessId: targetId });
             emit(runtime, { type: "feedback.submitted", sessionId: id, batch });
             emit(runtime, { type: "session.status", sessionId: id, status: runtime.session.status });
-            sendJson(res, { ok: true, message, batch, delivered: true, targetHarnessId: targetId });
+            broadcastPresence(runtime);
+            sendJson(res, { ok: true, message, batch, feedbackSession, delivered: true, targetHarnessId: targetId });
             return;
           }
 
@@ -754,7 +1243,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             emit(runtime, { type: "feedback.sent", sessionId: id, message, batch });
             emit(runtime, { type: "feedback.submitted", sessionId: id, batch });
             emit(runtime, { type: "session.status", sessionId: id, status: runtime.session.status });
-            sendJson(res, { ok: true, message, batch, delivered: true });
+            sendJson(res, { ok: true, message, batch, feedbackSession, delivered: true });
             return;
           }
 
@@ -770,7 +1259,17 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             messageId: message.id,
           });
           emit(runtime, { type: "session.status", sessionId: id, status: runtime.session.status });
-          sendJson(res, { ok: true, message, batch, delivered: false });
+          sendJson(res, { ok: true, message, batch, feedbackSession, delivered: false });
+          return;
+        }
+
+        if (action === "feedback-result") {
+          if (req.method !== "POST") return methodNotAllowed(res);
+          const violation = editLeaseViolation(runtime, harnessIdHeader(req));
+          if (violation) return sendJson(res, violation, 409);
+          const body = await readJsonBody<FeedbackResultRequest>(req);
+          const applied = await applyFeedbackResult(runtime, body.result);
+          sendJson(res, applied);
           return;
         }
 
@@ -916,9 +1415,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
     close: () =>
       new Promise((resolve, reject) => {
         clearInterval(heartbeat);
+        clearInterval(prune);
         for (const runtime of sessions.values()) {
           clearTimeout(runtime.watchTimer);
           clearTimeout(runtime.harnessTimer);
+          for (const conn of runtime.harnesses.values()) conn.waiter?.();
           void runtime.watcher?.close();
         }
         server.close((error) => (error ? reject(error) : resolve()));
@@ -975,6 +1476,148 @@ function validateFeedbackQuestions(questions: FeedbackQuestion[]): void {
   }
 }
 
+function buildFeedbackRequestMarkdown(manifest: PlanManifest, items: PlanFeedbackItem[], feedbackSessionId: string): string {
+  const filesByLayer = new Map(planLayers().map((layer) => [layer, manifest.files.filter((file) => file.layer === layer)]));
+  const itemsByLayer = new Map(planLayers().map((layer) => [layer, items.filter((item) => (item.layer ?? (item.filePath ? layerForPath(item.filePath) : "requirements")) === layer)]));
+  return [
+    "# Planalot Feedback Request",
+    "",
+    "Protocol: `planalot.feedback_request.v1`",
+    "Expected result: `planalot.feedback_result.v1`",
+    "",
+    `Plan: ${manifest.name}`,
+    `Plan ID: ${manifest.id}`,
+    `Feedback Session ID: ${feedbackSessionId}`,
+    "",
+    "## Harness Context",
+    "",
+    "You are connected to Planalot as an LLM harness. If your runtime supports a Planalot skill, plugin, or local harness instructions, load or consult them before acting.",
+    "",
+    "This request is self-contained for the current feedback session. If prior context was compacted or lost, treat this request plus the Planalot files as the source of truth.",
+    "",
+    "Planalot owns the plan workspace. Use Planalot file access/write mechanisms when you need more context or need to update files.",
+    "",
+    "Return only valid JSON matching `planalot.feedback_result.v1`.",
+    "",
+    "## Layer Model",
+    "",
+    "Resolve top-down: `requirements/` -> `design/` -> `tasks/`.",
+    "",
+    "`requirements/`: goals, business rules, constraints, acceptance criteria, non-goals, open questions.",
+    "`design/`: architecture, UX flows, data model, APIs, tradeoffs, risks, rejected alternatives.",
+    "`tasks/`: implementation slices, dependencies, file ownership, verification commands, rollout notes.",
+    "",
+    "If requirements change, reconcile design/tasks. If design changes, reconcile tasks. Do not silently change requirements because of downstream feedback.",
+    "",
+    "## Available Files",
+    "",
+    ...planLayers().flatMap((layer) => [
+      `### ${layerTitle(layer)}`,
+      "",
+      ...(filesByLayer.get(layer)?.length
+        ? filesByLayer.get(layer)!.map((file) => `- \`${file.path}\``)
+        : ["- No files"]),
+      "",
+    ]),
+    "You may retrieve full files or nearby context from Planalot if the selected text below is insufficient.",
+    "",
+    "## Feedback Items",
+    "",
+    ...planLayers().flatMap((layer) => {
+      const layerItems = itemsByLayer.get(layer) ?? [];
+      return [
+        `### ${layerTitle(layer)} Feedback`,
+        "",
+        ...(layerItems.length ? layerItems.flatMap(formatFeedbackItem) : ["No feedback in this layer.", ""]),
+      ];
+    }),
+    "## Required Result Format",
+    "",
+    "Return only valid JSON matching this shape:",
+    "",
+    "```json",
+    JSON.stringify({
+      schemaVersion: 1,
+      feedbackSessionId,
+      fileChanges: [
+        {
+          path: "requirements/index.md",
+          operation: "updated",
+          feedbackItemIds: ["fb_example"],
+          content: "optional full file content when Planalot should apply the change",
+          alreadyApplied: false,
+        },
+      ],
+      responses: [
+        {
+          id: "r_example",
+          kind: "question",
+          feedbackItemIds: ["fb_example"],
+          layer: "requirements",
+          text: "Question, clarification, or insight text.",
+          expectsUserFollowUp: true,
+          suggestedAnswers: [
+            { id: "answer_a", label: "Suggested answer", description: "Optional detail." },
+          ],
+        },
+      ],
+    }, null, 2),
+    "```",
+    "",
+    "Rules:",
+    "",
+    "- Use `fileChanges` for plan file edits.",
+    "- Use `responses` for clarification text, questions, or synthesized insight.",
+    "- A response may reference one, many, or no feedback items.",
+    "- Set `expectsUserFollowUp: true` only when Planalot should keep the session open waiting for the user.",
+    "- If you ask a question, include suggested answers when useful.",
+    "- Return JSON only. No markdown outside the JSON object.",
+  ].join("\n");
+}
+
+function formatFeedbackItem(item: PlanFeedbackItem): string[] {
+  const selectedText = item.annotations?.map((annotation) => annotation.originalText).filter(Boolean).join("\n\n");
+  return [
+    `#### \`${item.id}\``,
+    "",
+    `File: ${item.filePath ? `\`${item.filePath}\`` : "not provided"}`,
+    "Lines: not provided",
+    "",
+    "User comment:",
+    "",
+    blockquote(item.text),
+    "",
+    selectedText ? "Selected text:" : "Selected text: not provided",
+    selectedText ? "" : "",
+    ...(selectedText ? ["```md", selectedText, "```", ""] : []),
+  ];
+}
+
+function blockquote(text: string): string {
+  return text.split(/\r?\n/).map((line) => `> ${line}`).join("\n");
+}
+
+function layerTitle(layer: string): string {
+  return layer.slice(0, 1).toUpperCase() + layer.slice(1);
+}
+
+const NAME_ADJECTIVES = [
+  "amber", "brisk", "clever", "dapper", "eager", "fleet", "golden", "hardy",
+  "ivory", "jolly", "keen", "lucid", "merry", "nimble", "opal", "prime",
+  "quiet", "rapid", "sage", "tidy", "umber", "vivid", "warm", "zesty",
+];
+const NAME_ANIMALS = [
+  "otter", "falcon", "lynx", "heron", "marten", "ibex", "raven", "panda",
+  "tapir", "egret", "bison", "gecko", "koala", "lemur", "civet", "shrew",
+  "finch", "moose", "quail", "stoat", "viper", "wren", "yak", "zebu",
+];
+
+function generateHarnessName(): string {
+  const adjective = NAME_ADJECTIVES[Math.floor(Math.random() * NAME_ADJECTIVES.length)] ?? "amber";
+  const animal = NAME_ANIMALS[Math.floor(Math.random() * NAME_ANIMALS.length)] ?? "otter";
+  return `${adjective}-${animal}`;
+}
+
 function isRuntime(value: unknown): value is RuntimeKind {
   return value === "codex" || value === "pi" || value === "claude-code" || value === "manual";
 }
@@ -1004,7 +1647,7 @@ function buildImplementationInstruction(
     `Workspace: ${workspacePathValue}`,
     "",
     "Read these Planalot files from disk before implementing:",
-    fileLines || "- index.md: Canonical plan body",
+    fileLines || "- requirements/index.md: Canonical requirements and planning entrypoint",
     "",
     "Feedback summary:",
     feedbackSummary,

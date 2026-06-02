@@ -5,6 +5,14 @@ export interface DaemonConfig {
   watchDebounceMs: number;
   harnessEventDebounceMs: number;
   maxTrailModifications: number;
+  /** Recommended client heartbeat cadence; harnesses poll at or under this. */
+  heartbeatIntervalMs: number;
+  /** A harness with no heartbeat for longer than this is marked "down". */
+  harnessDownMs: number;
+  /** A harness with no heartbeat for longer than this is evicted entirely. */
+  harnessEvictMs: number;
+  /** Max long-poll budget the daemon will hold a heartbeat open for. */
+  longPollMs: number;
 }
 
 export function loadDaemonConfig(cwd = process.cwd()): DaemonConfig {
@@ -15,6 +23,10 @@ export function loadDaemonConfig(cwd = process.cwd()): DaemonConfig {
     watchDebounceMs: readNumber("PLANALOT_WATCH_DEBOUNCE_MS", 10_000),
     harnessEventDebounceMs: readNumber("PLANALOT_HARNESS_EVENT_DEBOUNCE_MS", 0),
     maxTrailModifications: readNumber("PLANALOT_MAX_TRAIL_MODIFICATIONS", 3),
+    heartbeatIntervalMs: readNumber("PLANALOT_HEARTBEAT_INTERVAL_MS", 30_000),
+    harnessDownMs: readNumber("PLANALOT_HARNESS_DOWN_MS", 45_000),
+    harnessEvictMs: readNumber("PLANALOT_HARNESS_EVICT_MS", 120_000),
+    longPollMs: readNumber("PLANALOT_LONG_POLL_MS", 25_000),
   };
 }
 

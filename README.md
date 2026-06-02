@@ -29,12 +29,16 @@ Each plan is stored as:
 ~/.planalot/plans/<id>/
   manifest.json
   feedback.json
-  index.md
-  architecture.md
-  flow.html
+  requirements/
+    index.md
+  design/
+    architecture.md
+    flow.html
+  tasks/
+    tasks.md
 ```
 
-`index.md` is required and canonical. Additional top-level sibling `.md` and `.html` files can be added as the plan grows.
+`requirements/index.md` is required and canonical. Additional `.md` and `.html` files live under `requirements/`, `design/`, or `tasks/`.
 
 Useful CLI commands:
 
@@ -43,8 +47,10 @@ pnpm planalot create --name "Payments Plan" --json
 pnpm planalot import PLAN.md --name "Payments Plan" --json
 pnpm planalot find payments --status planning --json
 pnpm planalot read <planId> --all --json
+pnpm planalot write <planId> design/architecture.md --stdin --json
 pnpm planalot open <planId>
 pnpm planalot wait-feedback <planId> --timeout 600 --json
+pnpm planalot feedback-result <planId> --stdin --json
 pnpm planalot implement <planId> --json
 ```
 
@@ -62,7 +68,13 @@ Then restart Pi or run `/reload`. The Pi extension provides `/planalot <existing
 pnpm planalot install cc
 ```
 
-This installs `~/.claude/commands/planalot.md`. In Claude Code, use `/planalot EXISTING_PLAN.md` to open an existing plan, or `/planalot lets start a new plan` to instruct Claude to create a markdown plan first and then open it in Planalot.
+This installs `~/.claude/skills/planalot/SKILL.md`. If an older generated `~/.claude/commands/planalot.md` exists, the installer updates it as a fallback, but Claude Code prefers the skill. In Claude Code, use `/planalot` to create, import, review, or continue Planalot-owned layered plan workspaces.
+
+To check whether the generated Claude Code skill matches the local Planalot CLI version:
+
+```bash
+pnpm planalot install cc --check
+```
 
 ## Codex install
 
@@ -72,6 +84,12 @@ codex plugin add planalot@personal
 ```
 
 Then start a new Codex thread and use `$planalot`. The Codex plugin opens Planalot from the current workspace, but feedback from the browser is manual/copyable until Codex exposes a live extension message bridge like Pi's `sendUserMessage`.
+
+To check whether the generated Codex plugin, generated skill, Codex cache, and local Planalot CLI version are in sync:
+
+```bash
+pnpm planalot install codex --check
+```
 
 ## License
 

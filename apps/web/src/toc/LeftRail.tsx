@@ -16,8 +16,8 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, FileCode2, FileText, FolderGit2, ListTree } from "lucide-react";
-import type { MarkdownBlock, PlanFileEntry, PlanSummary } from "@planalot/shared";
+import { ChevronDown, ChevronRight, FileCode2, FileText, FolderGit2, FolderOpen, ListTree } from "lucide-react";
+import type { MarkdownBlock, PlanFileEntry, PlanLayer, PlanSummary } from "@planalot/shared";
 import "./rail.css";
 
 type LeftRailView = "plan" | "all";
@@ -46,7 +46,13 @@ export function LeftRail({
   const headings = useMemo(() => blocks.filter((b) => b.type === "heading"), [blocks]);
   const [view, setView] = useState<LeftRailView>("plan");
   const [filesOpen, setFilesOpen] = useState(true);
+  const [layerOpen, setLayerOpen] = useState<Record<PlanLayer, boolean>>({
+    requirements: true,
+    design: true,
+    tasks: true,
+  });
   const [chaptersOpen, setChaptersOpen] = useState(true);
+  const filesByLayer = useMemo(() => groupFilesByLayer(files), [files]);
 
   // ID of the currently-visible heading (scroll-spy).
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -183,24 +189,38 @@ export function LeftRail({
       {view === "plan" ? (
         <div className="leftRailBody">
           <RailSection title="Files" open={filesOpen} onToggle={() => setFilesOpen((value) => !value)}>
-            <nav className="leftRailList" aria-label="Plan files">
-              {files.map((file) => (
-                <button
-                  key={file.path}
-                  type="button"
-                  className={file.path === selectedFile ? "leftRailItem leftRailItem--active" : "leftRailItem"}
-                  onClick={() => onFileSelect(file.path)}
-                  title={file.purpose || file.path}
-                >
-                  {file.type === "html" ? (
-                    <FileCode2 className="leftRailItem__fileIcon" aria-hidden="true" size={14} />
-                  ) : (
-                    <FileText className="leftRailItem__fileIcon" aria-hidden="true" size={14} />
-                  )}
-                  <span className="leftRailItem__text">{file.path}</span>
-                </button>
+            <div className="leftRailLayerList" aria-label="Plan files">
+              {PLAN_LAYER_ORDER.map((layer) => (
+                <div className="leftRailLayer" key={layer}>
+                  <button
+                    type="button"
+                    className="leftRailLayerHeader"
+                    aria-expanded={layerOpen[layer]}
+                    onClick={() => setLayerOpen((current) => ({ ...current, [layer]: !current[layer] }))}
+                  >
+                    {layerOpen[layer] ? <ChevronDown aria-hidden="true" size={13} /> : <ChevronRight aria-hidden="true" size={13} />}
+                    <FolderOpen aria-hidden="true" size={13} />
+                    <span>{LAYER_LABELS[layer]}</span>
+                  </button>
+                  {layerOpen[layer] ? (
+                    <nav className="leftRailList" aria-label={`${LAYER_LABELS[layer]} files`}>
+                      {filesByLayer[layer].length > 0 ? (
+                        filesByLayer[layer].map((file) => (
+                          <FileButton
+                            key={file.path}
+                            file={file}
+                            selected={file.path === selectedFile}
+                            onSelect={onFileSelect}
+                          />
+                        ))
+                      ) : (
+                        <p className="leftRailEmpty leftRailEmpty--compact">No files</p>
+                      )}
+                    </nav>
+                  ) : null}
+                </div>
               ))}
-            </nav>
+            </div>
           </RailSection>
 
           <RailSection title="Chapters" open={chaptersOpen} onToggle={() => setChaptersOpen((value) => !value)}>
@@ -254,6 +274,51 @@ export function LeftRail({
       )}
     </aside>
   );
+}
+
+const PLAN_LAYER_ORDER: readonly PlanLayer[] = ["requirements", "design", "tasks"];
+const LAYER_LABELS: Record<PlanLayer, string> = {
+  requirements: "Requirements",
+  design: "Design",
+  tasks: "Tasks",
+};
+
+function groupFilesByLayer(files: PlanFileEntry[]): Record<PlanLayer, PlanFileEntry[]> {
+  return {
+    requirements: files.filter((file) => file.layer === "requirements" || file.path.startsWith("requirements/")),
+    design: files.filter((file) => file.layer === "design" || file.path.startsWith("design/")),
+    tasks: files.filter((file) => file.layer === "tasks" || file.path.startsWith("tasks/")),
+  };
+}
+
+function FileButton({
+  file,
+  selected,
+  onSelect,
+}: {
+  file: PlanFileEntry;
+  selected: boolean;
+  onSelect: (path: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={selected ? "leftRailItem leftRailItem--active" : "leftRailItem"}
+      onClick={() => onSelect(file.path)}
+      title={file.purpose || file.path}
+    >
+      {file.type === "html" ? (
+        <FileCode2 className="leftRailItem__fileIcon" aria-hidden="true" size={14} />
+      ) : (
+        <FileText className="leftRailItem__fileIcon" aria-hidden="true" size={14} />
+      )}
+      <span className="leftRailItem__text">{fileName(file.path)}</span>
+    </button>
+  );
+}
+
+function fileName(path: string): string {
+  return path.split("/").at(-1) ?? path;
 }
 
 function RailSection({

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -47,6 +48,28 @@ export function planFeedbackPath(planId: string): string {
 
 export function planFilePath(planId: string, filePath: string): string {
   return join(planDir(planId), filePath);
+}
+
+export function harnessStateDir(): string {
+  return join(dataDir(), "harness");
+}
+
+/**
+ * Where a long-running `attach` records its harnessId so that subsequent
+ * short-lived CLI calls (write / add-file / feedback-result) can claim the
+ * same identity for edit-lease checks.
+ */
+export function harnessStatePath(planId: string): string {
+  return join(harnessStateDir(), `${planId}.json`);
+}
+
+/**
+ * Per-working-directory harness name, so a given harness instance (one project
+ * cwd) keeps the same friendly name across plans and reconnects.
+ */
+export function harnessNamePath(cwd: string): string {
+  const key = createHash("sha1").update(cwd).digest("hex").slice(0, 16);
+  return join(harnessStateDir(), "names", `${key}.json`);
 }
 
 export async function ensureDataDirs(): Promise<void> {

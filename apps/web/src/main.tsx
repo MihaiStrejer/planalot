@@ -37,10 +37,11 @@ const token = new URLSearchParams(window.location.search).get("token") ?? "";
 const sessionId = window.location.pathname.split("/").filter(Boolean).at(-1) ?? "";
 
 type DeliveryState = { status: "idle" | "delivered" | "failed"; error?: string };
-type SendBody = { kind: "chat" | "annotated-feedback"; message: string; annotations?: LiteAnnotation[] };
+type SendBody = { kind: "chat" | "annotated-feedback"; message: string; filePath?: string; annotations?: LiteAnnotation[] };
 type ResizePane = "left" | "right";
 type ThemeMode = "system" | "light" | "dark";
 
+const MAIN_PLAN_FILE = "requirements/index.md";
 const MIN_LEFT_WIDTH = 150;
 const MAX_LEFT_WIDTH = 440;
 const MIN_RIGHT_WIDTH = 280;
@@ -66,7 +67,7 @@ function App() {
   const [draft, setDraft] = useState("");
   const [files, setFiles] = useState<PlanFileEntry[]>([]);
   const [plans, setPlans] = useState<PlanSummary[]>([]);
-  const [selectedFile, setSelectedFile] = useState("index.md");
+  const [selectedFile, setSelectedFile] = useState(MAIN_PLAN_FILE);
   const [selectedContent, setSelectedContent] = useState("");
   const [leftWidth, setLeftWidth] = useState(() => storedPaneWidth("planalot:leftWidth", 220));
   const [rightWidth, setRightWidth] = useState(() => storedPaneWidth("planalot:rightWidth", 390));
@@ -161,7 +162,7 @@ function App() {
   async function chooseFile(path: string) {
     selectedFileRef.current = path;
     setSelectedFile(path);
-    if (path === "index.md" && session) {
+    if (path === MAIN_PLAN_FILE && session) {
       setSelectedContent(session.currentPlanText);
       return;
     }
@@ -195,7 +196,7 @@ function App() {
     setSession((current) => {
       if (!current) return current;
       if (event.type === "plan.changed") {
-        if (selectedFileRef.current === "index.md") setSelectedContent(event.planText);
+        if (selectedFileRef.current === MAIN_PLAN_FILE) setSelectedContent(event.planText);
         return {
           ...current,
           currentPlanText: event.planText,
@@ -208,6 +209,8 @@ function App() {
         const next: PlanSession = { ...current, harnesses: event.harnesses };
         if (event.targetHarnessId) next.targetHarnessId = event.targetHarnessId;
         else delete next.targetHarnessId;
+        if (event.editLease) next.editLease = event.editLease;
+        else delete next.editLease;
         return next;
       }
       if (event.type === "feedback.sent" || event.type === "plan.accepted" || event.type === "plan.build") {
@@ -292,6 +295,7 @@ function App() {
     const body: SendBody = {
       kind: sentAnnotations ? "annotated-feedback" : "chat",
       message: text || "(annotated feedback)",
+      filePath: selectedFile,
       ...(sentAnnotations ? { annotations: sentAnnotations } : {}),
     };
     const ok = await deliver(body);
@@ -322,6 +326,16 @@ function App() {
     });
     if (!response.ok) setError(await response.text());
     return response;
+  }
+
+  // Persistently designate the driver harness (server broadcasts presence back).
+  async function setDriver(harnessId: string) {
+    const response = await fetch(`/plans/${sessionId}/harnesses/main`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ harnessId }),
+    });
+    if (!response.ok) setError(await response.text());
   }
 
   function startResize(pane: ResizePane, event: React.PointerEvent<HTMLDivElement>) {
@@ -484,6 +498,8 @@ function App() {
           resolved={session.targetHarnessId}
           chosen={chosenTarget}
           onChoose={setChosenTarget}
+          editLease={session.editLease}
+          onSetDriver={(id) => void setDriver(id)}
         />
 
         <div className="decisionRow">
@@ -552,33 +568,69 @@ function HarnessBar({
   resolved,
   chosen,
   onChoose,
+  editLease,
+  onSetDriver,
 }: {
   harnesses: HarnessPresence[];
   resolved: string | undefined;
   chosen: string | null;
   onChoose: (id: string | null) => void;
+  editLease: PlanSession["editLease"];
+  onSetDriver: (id: string) => void;
 }) {
   if (harnesses.length === 0) {
     return <p className="harnessBar harnessBar--empty">No harness connected — sends will fail until one attaches.</p>;
   }
   const resolvedLabel = harnesses.find((h) => h.harnessId === resolved);
+  const lockLabels = editLease
+    ? editLease.holderHarnessIds.map((id) => harnesses.find((h) => h.harnessId === id)?.label ?? id)
+    : [];
   return (
     <div className="harnessBar">
-      <label className="harnessBar__label">Send to</label>
-      <select
-        className="harnessBar__select"
-        value={chosen ?? ""}
-        onChange={(e) => onChoose(e.target.value || null)}
-      >
-        <option value="">
-          Auto{resolvedLabel ? ` — ${resolvedLabel.harnessType} · ${resolvedLabel.label}` : ""}
-        </option>
+      <div className="harnessBar__roster">
         {harnesses.map((h) => (
-          <option key={h.harnessId} value={h.harnessId}>
-            {h.harnessType} · {h.label}
-          </option>
+          <span key={h.harnessId} className={`harnessChip harnessChip--${h.status}${h.isDriver ? " harnessChip--driver" : ""}`}>
+            <span className={`harnessChip__dot harnessChip__dot--${h.status}`} aria-hidden="true" />
+            <span className="harnessChip__name">{h.harnessType} · {h.label}</span>
+            {h.status === "down" ? <span className="harnessChip__badge harnessChip__badge--down">down</span> : null}
+            {h.isDriver ? (
+              <span className="harnessChip__badge harnessChip__badge--driver">driver</span>
+            ) : (
+              <button
+                type="button"
+                className="harnessChip__make"
+                onClick={() => onSetDriver(h.harnessId)}
+                disabled={h.status !== "live"}
+                title="Make this harness the plan driver"
+              >
+                make driver
+              </button>
+            )}
+          </span>
         ))}
-      </select>
+      </div>
+      {editLease ? (
+        <p className="harnessBar__lock">
+          🔒 Locked — {lockLabels.join(", ")} {lockLabels.length > 1 ? "are" : "is"} editing this plan (feedback round)
+        </p>
+      ) : null}
+      <div className="harnessBar__row">
+        <label className="harnessBar__label">Send to</label>
+        <select
+          className="harnessBar__select"
+          value={chosen ?? ""}
+          onChange={(e) => onChoose(e.target.value || null)}
+        >
+          <option value="">
+            Auto{resolvedLabel ? ` — ${resolvedLabel.harnessType} · ${resolvedLabel.label}` : ""}
+          </option>
+          {harnesses.map((h) => (
+            <option key={h.harnessId} value={h.harnessId}>
+              {h.harnessType} · {h.label}{h.status === "down" ? " (down)" : ""}
+            </option>
+          ))}
+        </select>
+      </div>
     </div>
   );
 }
