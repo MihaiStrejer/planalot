@@ -2,6 +2,8 @@
 
 A local plan workspace daemon and browser UI for agent planning workflows.
 
+> **⚠️ Experimental — early phase.** Planalot is in an experimental, pre-1.0 stage. The CLI commands, HTTP API, on-disk plan format, and overall behavior may change without notice between releases, and breaking changes can land in any version. Not yet recommended for production use.
+
 ## Stack
 
 - Node.js 22+ native HTTP daemon

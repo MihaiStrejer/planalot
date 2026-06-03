@@ -1,0 +1,37 @@
+name: CI
+
+# Validates every PR and every push to main: install, typecheck, build, bundle,
+# and confirm the publishable tarball still assembles. Keeps main releasable.
+# No secrets, no publishing.
+on:
+  push:
+    branches:
+      - main
+  pull_request: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck + build
+        run: pnpm check
+
+      - name: Bundle CLI
+        run: pnpm bundle
+
+      - name: Verify package contents
+        run: npm pack --dry-run --ignore-scripts

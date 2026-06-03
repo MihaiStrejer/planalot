@@ -1,0 +1,80 @@
+name: Release
+
+# Cuts a release when you push a version tag from main:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# It publishes `planalot` to npm (with provenance) and creates a matching
+# GitHub Release with the .tgz attached and auto-generated notes. The tag must
+# match package.json's version, so the git tag, the npm version, and the GitHub
+# Release are always 1:1. Build runs on x64 Linux — the local Windows-on-ARM
+# pnpm/rollup issue never applies here.
+#
+# Requires repo secret NPM_TOKEN (npm "Automation" or granular write token).
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # npm --provenance (repo is public → publicly verifiable)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org # wires NODE_AUTH_TOKEN into .npmrc
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag, version match, and version only rolls up
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="${GITHUB_REF_NAME#v}"
+
+          # Tag must equal package.json version: git tag <-> npm version <-> Release are 1:1.
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v$TAG does not match package.json version $VERSION. Bump the version and retag."
+            exit 1
+          fi
+
+          # Version must be STRICTLY GREATER than what's already on npm (roll-up only).
+          # npm blocks re-publishing the same version but not an older one, so guard it.
+          CURRENT="$(npm view "$NAME" version 2>/dev/null || true)"
+          if [ -z "$CURRENT" ]; then
+            echo "::notice::No published version yet -- $VERSION is the first release."
+          else
+            HIGHEST="$(printf '%s\n%s\n' "$CURRENT" "$VERSION" | sort -V | tail -n1)"
+            if [ "$VERSION" = "$CURRENT" ] || [ "$HIGHEST" != "$VERSION" ]; then
+              echo "::error::$VERSION is not greater than the published $CURRENT. Versions only roll up -- bump higher and retag."
+              exit 1
+            fi
+            echo "::notice::$VERSION > $CURRENT -- rolling up."
+          fi
+
+      # `npm publish` runs the root `prepack` script (pnpm build && pnpm bundle),
+      # so the single-file dist/cli.js + dist/web are built fresh on the runner.
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Pack tarball for the GitHub Release
+        run: npm pack --ignore-scripts # dist is already built by the publish step
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes ./*.tgz

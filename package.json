@@ -1,7 +1,6 @@
 {
   "name": "planalot",
   "version": "0.1.0",
-  "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "description": "Lightweight local plan conversation daemon and browser UI for agent planning workflows.",
@@ -14,12 +13,20 @@
     "url": "https://github.com/MihaiStrejer/planalot/issues"
   },
   "homepage": "https://github.com/MihaiStrejer/planalot#readme",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "bin": {
-    "planalot": "packages/daemon/dist/cli.js"
+    "planalot": "dist/cli.js"
   },
   "scripts": {
     "dev": "pnpm --filter @planalot/daemon dev",
     "build": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex build && pnpm --filter @planalot/web build && pnpm --filter @planalot/daemon build",
+    "bundle": "node scripts/bundle.mjs",
+    "prepack": "pnpm build && pnpm bundle",
     "typecheck": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex typecheck && pnpm --filter @planalot/web typecheck && pnpm --filter @planalot/daemon typecheck",
     "check": "pnpm typecheck && pnpm build",
     "planalot": "node packages/daemon/dist/cli.js"
@@ -33,11 +40,15 @@
       "esbuild"
     ]
   },
+  "dependencies": {
+    "chokidar": "^5.0.0"
+  },
   "optionalDependencies": {
     "@rollup/rollup-win32-arm64-msvc": "^4.60.4"
   },
   "devDependencies": {
     "@types/node": "^25.0.0",
+    "esbuild": "^0.28.0",
     "typescript": "^5.9.3"
   }
 }
