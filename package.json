@@ -27,7 +27,7 @@
     "build": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex build && pnpm --filter @planalot/web build && pnpm --filter @planalot/daemon build",
     "bundle": "node scripts/bundle.mjs",
     "prepack": "pnpm build && pnpm bundle",
-    "typecheck": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex typecheck && pnpm --filter @planalot/web typecheck && pnpm --filter @planalot/daemon typecheck",
+    "typecheck": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex build && pnpm --filter @planalot/web typecheck && pnpm --filter @planalot/daemon typecheck",
     "check": "pnpm typecheck && pnpm build",
     "planalot": "node packages/daemon/dist/cli.js"
   },
