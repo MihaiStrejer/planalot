@@ -687,7 +687,8 @@ button.ghost.inline {
 
 .harnessBar {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 7px;
   padding: 7px 8px;
   border: 1px solid var(--border);
@@ -699,6 +700,107 @@ button.ghost.inline {
   color: var(--warning);
   font-size: 12px;
   border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+  background: var(--warning-muted);
+}
+
+.harnessBar__roster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.harnessBar__row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.harnessChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 12px;
+}
+
+.harnessChip--down {
+  opacity: 0.6;
+}
+
+.harnessChip--driver {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+}
+
+.harnessChip__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.harnessChip__dot--live {
+  background: var(--success);
+}
+
+.harnessChip__dot--down {
+  background: var(--text-subtle);
+}
+
+.harnessChip__name {
+  color: var(--text);
+}
+
+.harnessChip__badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.harnessChip__badge--driver {
+  color: var(--success);
+  background: var(--success-muted);
+}
+
+.harnessChip__badge--down {
+  color: var(--text-subtle);
+  background: var(--surface-muted, color-mix(in srgb, var(--text-subtle) 14%, transparent));
+}
+
+.harnessChip__make {
+  font: inherit;
+  font-size: 11px;
+  color: var(--text-subtle);
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+
+.harnessChip__make:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-subtle);
+}
+
+.harnessChip__make:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.harnessBar__lock {
+  margin: 0;
+  font-size: 12px;
+  color: var(--warning);
+  padding: 4px 8px;
+  border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--border));
+  border-radius: 6px;
   background: var(--warning-muted);
 }
 

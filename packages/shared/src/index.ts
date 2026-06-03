@@ -2,6 +2,8 @@ export type RuntimeKind = "codex" | "pi" | "claude-code" | "manual";
 
 export type PlanStatus = "planning" | "implementing" | "done" | "canceled" | "expired";
 
+export type PlanLayer = "requirements" | "design" | "tasks";
+
 export type PlanOrigin =
   | { kind: "blank" }
   | { kind: "text-import" }
@@ -15,8 +17,26 @@ export interface HarnessRef {
   lastActiveAt?: string;
 }
 
+export type HarnessStatus = "live" | "down";
+export type HarnessRole = "driver" | "peer";
+export type HarnessTransport = "sse" | "poll";
+
+/**
+ * Exclusive edit lease on a plan, granted to the harness(es) a feedback round
+ * (`feedbackRequestId`) is addressed to. While held, the daemon rejects plan
+ * mutations from any harness not in `holderHarnessIds` — the single-writer
+ * invariant. Released when the round closes or the holder is evicted.
+ */
+export interface PlanEditLease {
+  holderHarnessIds: string[];
+  /** The feedback session id (fs_…) this lease is bound to. */
+  feedbackRequestId: string;
+  grantedAt: number;
+}
+
 export interface PlanFileEntry {
   path: string;
+  layer: PlanLayer;
   type: "markdown" | "html";
   title: string;
   purpose: string;
@@ -31,7 +51,7 @@ export interface PlanManifest {
   createdAt: string;
   updatedAt: string;
   expiresAt: string;
-  mainFile: "index.md";
+  mainFile: string;
   origin: PlanOrigin;
   harnesses: {
     main?: HarnessRef;
@@ -43,10 +63,13 @@ export interface PlanManifest {
 export interface PlanFeedbackItem {
   id: string;
   kind: "chat" | "annotated-feedback" | "render-error";
-  status: "open" | "resolved" | "dismissed";
+  status: "open" | "resolved" | "dismissed" | "superseded" | "needs-clarification" | "result-invalid";
   text: string;
+  layer?: PlanLayer;
   filePath?: string;
   annotations?: LiteAnnotation[];
+  responseIds?: string[];
+  feedbackSessionIds?: string[];
   targetHarness?: HarnessRef;
   createdAt: string;
   updatedAt: string;
@@ -56,6 +79,8 @@ export interface PlanFeedbackItem {
 
 export interface PlanFeedbackStore {
   items: PlanFeedbackItem[];
+  sessions?: FeedbackSession[];
+  responses?: FeedbackResponse[];
 }
 
 export interface PlanSummary {
@@ -79,6 +104,7 @@ export interface PlanWorkspaceView {
   feedback: PlanFeedbackStore;
   harnesses?: HarnessPresence[];
   targetHarnessId?: string;
+  editLease?: PlanEditLease;
 }
 
 export interface CreatePlanRequest {
@@ -117,6 +143,7 @@ export interface AddPlanFeedbackRequest {
   kind: "chat" | "annotated-feedback" | "render-error";
   text: string;
   filePath?: string;
+  layer?: PlanLayer;
   annotations?: LiteAnnotation[];
   targetHarnessId?: string;
 }
@@ -167,9 +194,11 @@ export interface LiteAnnotation {
 }
 
 /**
- * A harness instance currently connected to a session's SSE stream. Routing
- * keys on `harnessId` (unique per instance); `harnessType` + `label` let the
- * browser tell multiple connected instances of the same type apart.
+ * A harness instance attached to a plan. Routing keys on `harnessId` (unique
+ * per instance); `harnessType` + `label` let the browser tell multiple
+ * instances of the same type apart. Presence is governed by the attach /
+ * heartbeat / detach lifecycle and a `lastSeenAt` TTL — `status` flips to
+ * "down" when heartbeats lapse, before the harness is evicted.
  */
 export interface HarnessPresence {
   harnessId: string;
@@ -177,6 +206,49 @@ export interface HarnessPresence {
   label: string;
   connectedAt: number;
   lastActiveAt?: number;
+  lastSeenAt: number;
+  status: HarnessStatus;
+  transport: HarnessTransport;
+  isDriver: boolean;
+}
+
+export interface HarnessAttachRequest {
+  harnessType?: RuntimeKind;
+  label?: string;
+  /** Reuse a prior id to keep the driver designation across reconnects. */
+  harnessId?: string;
+  /** Request the driver role (honored only when no live driver is set). */
+  drive?: boolean;
+}
+
+export interface HarnessAttachResponse {
+  harnessId: string;
+  /** Effective display name for this harness (server-assigned if not provided). */
+  label: string;
+  role: HarnessRole;
+  roster: HarnessPresence[];
+  cursor: number;
+  editLease?: PlanEditLease;
+}
+
+export interface HarnessHeartbeatRequest {
+  /** Last event cursor the harness has processed; events after it are returned. */
+  cursor?: number;
+  /** Long-poll budget in ms (capped server-side); 0 = return immediately. */
+  waitMs?: number;
+}
+
+export interface HarnessHeartbeatResponse {
+  harnessId: string;
+  role: HarnessRole;
+  roster: HarnessPresence[];
+  events: ServerEvent[];
+  cursor: number;
+  editLease?: PlanEditLease;
+}
+
+export interface HarnessDetachResponse {
+  ok: true;
 }
 
 export interface ConversationMessage {
@@ -269,6 +341,8 @@ export interface PlanSession {
   targetHarnessId?: string;
   /** harnessId of the harness that last signalled a plan change. */
   lastActiveHarnessId?: string;
+  /** Active exclusive edit lease (set while a feedback round is in flight). */
+  editLease?: PlanEditLease;
   createdAt: number;
   updatedAt: number;
 }
@@ -289,9 +363,57 @@ export interface CreateSessionResponse {
 export interface FeedbackRequest {
   kind: "chat" | "annotated-feedback";
   message: string;
+  filePath?: string;
+  layer?: PlanLayer;
   annotations?: LiteAnnotation[];
   /** Optional user-chosen routing override (a connected harnessId). */
   targetHarnessId?: string;
+}
+
+export interface FeedbackSession {
+  id: string;
+  feedbackItemIds: string[];
+  status: "open" | "closed" | "result-invalid";
+  createdAt: string;
+  updatedAt: string;
+  requestMarkdown: string;
+  result?: FeedbackResult;
+  error?: string;
+}
+
+export interface FeedbackFileChange {
+  path: string;
+  operation: "created" | "updated" | "deleted";
+  feedbackItemIds?: string[];
+  content?: string;
+  alreadyApplied?: boolean;
+}
+
+export interface FeedbackResponseSuggestion {
+  id: string;
+  label: string;
+  description?: string;
+}
+
+export interface FeedbackResponse {
+  id: string;
+  kind: "clarification" | "question" | "insight";
+  feedbackItemIds?: string[];
+  layer?: PlanLayer;
+  text: string;
+  expectsUserFollowUp: boolean;
+  suggestedAnswers?: FeedbackResponseSuggestion[];
+}
+
+export interface FeedbackResult {
+  schemaVersion: 1;
+  feedbackSessionId: string;
+  fileChanges?: FeedbackFileChange[];
+  responses?: FeedbackResponse[];
+}
+
+export interface FeedbackResultRequest {
+  result: FeedbackResult;
 }
 
 export interface AgentMessageRequest {
@@ -327,7 +449,7 @@ export type ServerEvent =
   | { type: "feedback.answered"; sessionId: string; request: FeedbackQuestionRequest; answers: FeedbackAnswer[]; targetHarnessId?: string }
   | { type: "plan.accepted"; sessionId: string; message: ConversationMessage; targetHarnessId?: string }
   | { type: "plan.build"; sessionId: string; message: ConversationMessage; targetHarnessId?: string }
-  | { type: "harness.presence"; sessionId: string; harnesses: HarnessPresence[]; targetHarnessId?: string }
+  | { type: "harness.presence"; sessionId: string; harnesses: HarnessPresence[]; targetHarnessId?: string; editLease?: PlanEditLease }
   | { type: "implementation.requested"; sessionId: string; message: ConversationMessage; targetHarnessId?: string }
   | { type: "file.changed"; sessionId: string; filePath: string }
   | { type: "feedback.added"; sessionId: string; feedback: PlanFeedbackItem }

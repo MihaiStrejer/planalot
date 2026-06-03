@@ -16,6 +16,7 @@
 
 .leftRailTab,
 .leftRailSectionHeader,
+.leftRailLayerHeader,
 .leftRailItem,
 .leftRailPlan {
   appearance: none;
@@ -95,6 +96,35 @@
 .leftRailList {
   display: flex;
   flex-direction: column;
+}
+
+.leftRailLayerList {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.leftRailLayerHeader {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  height: 25px;
+  padding: 0 8px 0 14px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.leftRailLayerHeader:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.leftRailLayer .leftRailItem {
+  padding-left: 27px;
 }
 
 .leftRailItem {
@@ -201,8 +231,14 @@
   font-size: 12px;
 }
 
+.leftRailEmpty--compact {
+  padding: 4px 10px 6px 30px;
+  font-size: 11px;
+}
+
 .leftRailTab:focus-visible,
 .leftRailSectionHeader:focus-visible,
+.leftRailLayerHeader:focus-visible,
 .leftRailItem:focus-visible,
 .leftRailPlan:focus-visible {
   outline: 2px solid var(--accent);

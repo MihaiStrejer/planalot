@@ -52,3 +52,6 @@ Thumbs.db
 tmp/
 temp/
 .cache/
+
+# Local experiments (not part of the product)
+/experiments/
