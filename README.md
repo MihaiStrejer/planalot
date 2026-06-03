@@ -4,6 +4,27 @@ A local plan workspace daemon and browser UI for agent planning workflows.
 
 > **⚠️ Experimental — early phase.** Planalot is in an experimental, pre-1.0 stage. The CLI commands, HTTP API, on-disk plan format, and overall behavior may change without notice between releases, and breaking changes can land in any version. Not yet recommended for production use.
 
+## Install
+
+Install the CLI globally from npm:
+
+```bash
+npm install -g planalot
+```
+
+Then wire Planalot into your agent harness:
+
+```bash
+# For Claude Code
+planalot install cc
+
+# For Codex
+planalot install codex
+
+# For Pi
+planalot install pi
+```
+
 ## Stack
 
 - Node.js 22+ native HTTP daemon

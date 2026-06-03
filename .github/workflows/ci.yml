@@ -1,13 +1,15 @@
 name: CI
 
-# Validates every PR and every push to main: install, typecheck, build, bundle,
-# and confirm the publishable tarball still assembles. Keeps main releasable.
+# Validates every pull request: install, typecheck, build, bundle, and confirm
+# the publishable tarball still assembles. PR-only (not branch pushes) to save
+# Actions minutes; concurrency cancels superseded runs on rapid pushes.
 # No secrets, no publishing.
 on:
-  push:
-    branches:
-      - main
   pull_request: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
