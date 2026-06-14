@@ -15,7 +15,10 @@ export const APP_NAME = "planalot";
 export const APP_VERSION = "0.1.0";
 
 export function dataDir(): string {
-  return join(homedir(), ".planalot");
+  // PLANALOT_DATA_DIR isolates planalot's data root WITHOUT moving HOME — so an
+  // isolated test daemon (and the `planalot` commands a harness spawns) can use a
+  // throwaway dir while the harness keeps reading its real auth from the real HOME.
+  return process.env.PLANALOT_DATA_DIR || join(homedir(), ".planalot");
 }
 
 export function daemonMetadataPath(): string {

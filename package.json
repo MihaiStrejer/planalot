@@ -29,6 +29,8 @@
     "prepack": "pnpm build && pnpm bundle",
     "typecheck": "pnpm --filter @planalot/shared build && pnpm --filter @planalot/extension-kit build && pnpm --filter @planalot/pi build && pnpm --filter @planalot/cc build && pnpm --filter @planalot/codex build && pnpm --filter @planalot/web typecheck && pnpm --filter @planalot/daemon typecheck",
     "check": "pnpm typecheck && pnpm build",
+    "test": "pnpm --filter \"@planalot/daemon^...\" build && pnpm --filter @planalot/daemon test",
+    "test:e2e": "pnpm --filter \"@planalot/daemon^...\" build && pnpm --filter @planalot/daemon exec tsc -p tsconfig.json && pnpm --filter @planalot/daemon exec node --import tsx test/e2e/ccLoop.ts",
     "planalot": "node packages/daemon/dist/cli.js"
   },
   "engines": {
@@ -38,7 +40,11 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "esbuild"
-    ]
+    ],
+    "supportedArchitectures": {
+      "os": ["win32"],
+      "cpu": ["x64", "arm64"]
+    }
   },
   "dependencies": {
     "chokidar": "^5.0.0"

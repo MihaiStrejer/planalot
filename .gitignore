@@ -55,3 +55,6 @@ temp/
 
 # Local experiments (not part of the product)
 /experiments/
+
+# Harness attach runtime state (pid/err/harness handle per attach session)
+.planalot-attach-*
