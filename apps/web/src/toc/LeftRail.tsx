@@ -16,8 +16,9 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, FileCode2, FileText, FolderGit2, FolderOpen, ListTree } from "lucide-react";
-import type { MarkdownBlock, PlanFileEntry, PlanLayer, PlanSummary } from "@planalot/shared";
+import { ChevronDown, ChevronRight, FileCode2, FileText, FlaskConical, FolderGit2, FolderOpen, ListTree } from "lucide-react";
+import type { MarkdownBlock, PlanFileEntry, PlanLayer, PlanSummary, ResearchSession } from "@planalot/shared";
+import { INQUIRY_META, researchProgress } from "../research/status";
 import "./rail.css";
 
 type LeftRailView = "plan" | "all";
@@ -29,8 +30,11 @@ export interface LeftRailProps {
   files: PlanFileEntry[];
   selectedFile: string;
   plans: PlanSummary[];
+  research: ResearchSession[];
+  selectedResearchId: string | null;
   onFileSelect: (path: string) => void;
   onPlanSelect: (planId: string) => void;
+  onResearchSelect: (researchId: string) => void;
 }
 
 export function LeftRail({
@@ -40,8 +44,11 @@ export function LeftRail({
   files,
   selectedFile,
   plans,
+  research,
+  selectedResearchId,
   onFileSelect,
   onPlanSelect,
+  onResearchSelect,
 }: LeftRailProps): React.ReactElement {
   const headings = useMemo(() => blocks.filter((b) => b.type === "heading"), [blocks]);
   const [view, setView] = useState<LeftRailView>("plan");
@@ -52,6 +59,7 @@ export function LeftRail({
     tasks: true,
   });
   const [chaptersOpen, setChaptersOpen] = useState(true);
+  const [researchOpen, setResearchOpen] = useState(true);
   const filesByLayer = useMemo(() => groupFilesByLayer(files), [files]);
 
   // ID of the currently-visible heading (scroll-spy).
@@ -221,6 +229,48 @@ export function LeftRail({
                 </div>
               ))}
             </div>
+          </RailSection>
+
+          <RailSection title="Research" open={researchOpen} onToggle={() => setResearchOpen((value) => !value)}>
+            {research.length > 0 ? (
+              <div className="leftRailResearch">
+                {research.map((session) => {
+                  const { resolved, total } = researchProgress(session);
+                  const selected = session.id === selectedResearchId;
+                  return (
+                    <div key={session.id}>
+                      <button
+                        type="button"
+                        className={selected ? "railResearch__head railResearch__head--active" : "railResearch__head"}
+                        onClick={() => onResearchSelect(session.id)}
+                        title={session.title}
+                      >
+                        <FlaskConical className="railResearch__icon" aria-hidden="true" size={13} />
+                        <span className="railResearch__name">{session.title}</span>
+                        <span className="railResearch__count">{resolved}/{total}</span>
+                      </button>
+                      <div className="railResearch__inquiries">
+                        {session.inquiries.map((inquiry) => {
+                          const meta = INQUIRY_META[inquiry.status];
+                          return (
+                            <div
+                              className={`railInquiry railInquiry--${inquiry.status}`}
+                              key={inquiry.id}
+                              title={`${inquiry.title} — ${meta.label}`}
+                            >
+                              <span className="railInquiry__glyph" style={{ color: meta.colorVar }} aria-hidden="true">{meta.glyph}</span>
+                              <span className="railInquiry__text">{inquiry.title}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="leftRailEmpty">No research sessions.</p>
+            )}
           </RailSection>
 
           <RailSection title="Chapters" open={chaptersOpen} onToggle={() => setChaptersOpen((value) => !value)}>

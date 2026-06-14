@@ -50,6 +50,15 @@ export function planFilePath(planId: string, filePath: string): string {
   return join(planDir(planId), filePath);
 }
 
+/** Directory holding a plan's research sessions (one JSON file per session). */
+export function researchDir(planId: string): string {
+  return join(planDir(planId), "research");
+}
+
+export function researchPath(planId: string, researchId: string): string {
+  return join(researchDir(planId), `${researchId}.json`);
+}
+
 export function harnessStateDir(): string {
   return join(dataDir(), "harness");
 }

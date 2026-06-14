@@ -7,9 +7,11 @@ import { fileURLToPath } from "node:url";
 import chokidar, { type FSWatcher } from "chokidar";
 import type {
   AgentMessageRequest,
+  AddInquiriesRequest,
   AddPlanFeedbackRequest,
   ConversationMessage,
   CreatePlanRequest,
+  CreateResearchRequest,
   CreateSessionRequest,
   FeedbackAnsweredRequest,
   FeedbackBatch,
@@ -36,11 +38,15 @@ import type {
   PlanStatus,
   PlanUpdatedRequest,
   PlanVersion,
+  ResearchSession,
   RuntimeKind,
   ServerEvent,
+  UpdateInquiryRequest,
   UpdatePlanFeedbackRequest,
   UpdatePlanFileMetadataRequest,
   UpdatePlanMetadataRequest,
+  UpdateResearchRequest,
+  UpdateResearchScopeRequest,
   UpsertPlanFileRequest,
 } from "@planalot/shared";
 import { loadDaemonConfig, type DaemonConfig } from "./config.js";
@@ -74,6 +80,15 @@ import {
   writeFeedback,
   writeManifest,
 } from "./planStore.js";
+import {
+  addInquiries,
+  createResearch,
+  listResearch,
+  readResearch,
+  updateInquiry,
+  updateResearchMeta,
+  updateResearchScope,
+} from "./researchStore.js";
 
 interface QueuedEvent {
   seq: number;
@@ -851,6 +866,88 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
         return methodNotAllowed(res);
       }
 
+      // Research sessions: plan-scoped, lease-EXEMPT investigations. Token auth
+      // only — these routes never call editLeaseViolation, so many subagents can
+      // resolve inquiries in parallel while the plan's own edit lease is held.
+      const planResearchMatch = url.pathname.match(/^\/plans\/([^/]+)\/research(?:\/([^/]+)(?:\/(scope|inquiries)(?:\/([^/]+))?)?)?$/);
+      if (planResearchMatch) {
+        const id = planResearchMatch[1] ?? "";
+        const rid = planResearchMatch[2];
+        const sub = planResearchMatch[3];
+        const iid = planResearchMatch[4];
+        if (!authorize(url) && !authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+
+        const emitResearchUpdated = async (research: ResearchSession): Promise<void> => {
+          const runtime = await loadSession(id);
+          if (runtime) emit(runtime, { type: "research.updated", sessionId: id, research });
+        };
+
+        // /plans/:id/research
+        if (rid === undefined) {
+          if (req.method === "GET") {
+            sendJson(res, { research: await listResearch(id) });
+            return;
+          }
+          if (req.method === "POST") {
+            if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+            const body = await readJsonBody<CreateResearchRequest>(req);
+            const research = await createResearch(id, body);
+            await emitResearchUpdated(research);
+            sendJson(res, { research }, 201);
+            return;
+          }
+          return methodNotAllowed(res);
+        }
+
+        // /plans/:id/research/:rid
+        if (sub === undefined) {
+          if (req.method === "GET") {
+            sendJson(res, { research: await readResearch(id, rid) });
+            return;
+          }
+          if (req.method === "PATCH") {
+            if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+            const body = await readJsonBody<UpdateResearchRequest>(req);
+            const research = await updateResearchMeta(id, rid, body);
+            await emitResearchUpdated(research);
+            sendJson(res, { research });
+            return;
+          }
+          return methodNotAllowed(res);
+        }
+
+        // /plans/:id/research/:rid/scope
+        if (sub === "scope") {
+          if (req.method !== "PUT") return methodNotAllowed(res);
+          if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+          const body = await readJsonBody<UpdateResearchScopeRequest>(req);
+          if (typeof body.scope !== "string") throw new Error("scope must be a string");
+          const research = await updateResearchScope(id, rid, body.scope);
+          await emitResearchUpdated(research);
+          sendJson(res, { research });
+          return;
+        }
+
+        // /plans/:id/research/:rid/inquiries[/:iid]
+        if (iid === undefined) {
+          if (req.method !== "POST") return methodNotAllowed(res);
+          if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+          const body = await readJsonBody<AddInquiriesRequest>(req);
+          const research = await addInquiries(id, rid, body);
+          await emitResearchUpdated(research);
+          sendJson(res, { research }, 201);
+          return;
+        }
+        if (req.method !== "PATCH") return methodNotAllowed(res);
+        if (!authorizeHeader(req)) return sendJson(res, { error: "Unauthorized" }, 401);
+        const inquiryBody = await readJsonBody<UpdateInquiryRequest>(req);
+        const { research, inquiry } = await updateInquiry(id, rid, iid, inquiryBody);
+        const runtime = await loadSession(id);
+        if (runtime) emit(runtime, { type: "research.inquiry.updated", sessionId: id, researchId: research.id, inquiry });
+        sendJson(res, { research, inquiry });
+        return;
+      }
+
       const planHarnessMatch = url.pathname.match(/^\/plans\/([^/]+)\/harnesses(?:\/([^/]+)\/active|\/main)$/);
       if (planHarnessMatch) {
         const id = planHarnessMatch[1] ?? "";
@@ -922,6 +1019,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
           if (conn.res === undefined) conn.transport = "poll";
           runtime.harnesses.set(harnessId, conn);
 
+          // Resume cursor: a reattaching poll harness may have targeted events
+          // queued during a window with no heartbeat in flight (e.g. an
+          // --exit-on-feedback waiter between its exit and relaunch). Rewind to
+          // just before the oldest undelivered event so the next heartbeat
+          // replays them instead of skipping to the latest seq. Heartbeats prune
+          // delivered events from the queue, so this never replays handled ones.
+          // Fresh harnesses (empty queue) start at the current head.
+          const resumeCursor = conn.queue.length > 0 ? conn.queue[0]!.seq - 1 : runtime.eventSeq;
+
           // Honor a drive request only when no live driver is already designated.
           const currentDriver = runtime.driverHarnessId ? runtime.harnesses.get(runtime.driverHarnessId) : undefined;
           if (body.drive === true && (!runtime.driverHarnessId || currentDriver?.status !== "live")) {
@@ -936,7 +1042,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<{ p
             label,
             role,
             roster: presenceList(runtime),
-            cursor: runtime.eventSeq,
+            cursor: resumeCursor,
             ...(runtime.editLease ? { editLease: runtime.editLease } : {}),
           });
           return;

@@ -416,6 +416,75 @@ export interface FeedbackResultRequest {
   result: FeedbackResult;
 }
 
+// ---------------------------------------------------------------------------
+// Research sessions
+//
+// A research session is a plan-scoped, single-file investigation: a free-text
+// `scope` (the context body) plus a list of `inquiries` (the questions the
+// research must resolve). Unlike plan files — single-writer blobs behind the
+// edit lease — inquiries are individually addressable and lease-exempt, so many
+// subagents can resolve them in parallel. Distinct from plan `tasks`.
+// ---------------------------------------------------------------------------
+
+export type InquiryStatus = "open" | "active" | "blocked" | "resolved" | "dropped";
+
+export interface ResearchInquiry {
+  id: string;
+  title: string;
+  detail?: string;
+  status: InquiryStatus;
+  /** Harness/subagent label currently working this inquiry. */
+  assignee?: string;
+  /** Findings (markdown) recorded when the inquiry is resolved. */
+  result?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchSession {
+  id: string;
+  planId: string;
+  title: string;
+  status: "open" | "closed";
+  /** The context body — markdown describing the scope of the research. */
+  scope: string;
+  inquiries: ResearchInquiry[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResearchInquiryInput {
+  title: string;
+  detail?: string;
+}
+
+export interface CreateResearchRequest {
+  title: string;
+  scope?: string;
+  inquiries?: ResearchInquiryInput[];
+}
+
+export interface UpdateResearchRequest {
+  title?: string;
+  status?: "open" | "closed";
+}
+
+export interface UpdateResearchScopeRequest {
+  scope: string;
+}
+
+export interface AddInquiriesRequest {
+  inquiries: ResearchInquiryInput[];
+}
+
+export interface UpdateInquiryRequest {
+  title?: string;
+  detail?: string;
+  status?: InquiryStatus;
+  assignee?: string;
+  result?: string;
+}
+
 export interface AgentMessageRequest {
   message: string;
 }
@@ -454,7 +523,9 @@ export type ServerEvent =
   | { type: "file.changed"; sessionId: string; filePath: string }
   | { type: "feedback.added"; sessionId: string; feedback: PlanFeedbackItem }
   | { type: "feedback.updated"; sessionId: string; feedback: PlanFeedbackItem }
-  | { type: "feedback.failed"; sessionId: string; error: string; messageId?: string };
+  | { type: "feedback.failed"; sessionId: string; error: string; messageId?: string }
+  | { type: "research.updated"; sessionId: string; research: ResearchSession }
+  | { type: "research.inquiry.updated"; sessionId: string; researchId: string; inquiry: ResearchInquiry };
 
 export interface MarkdownBlock {
   id: string;

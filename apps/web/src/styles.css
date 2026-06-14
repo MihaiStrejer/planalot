@@ -184,11 +184,14 @@ button { font-variant-numeric: tabular-nums; }
 }
 
 .contentPane {
+  /* Edge gap between the content card and the pane: 50px on wide screens,
+     scaling smoothly down to 16px on narrow ones. */
+  --content-edge: clamp(16px, 4vw, 50px);
   grid-column: 3;
   min-width: 0;
   height: 100vh;
   overflow: auto;
-  padding: 0 6px 2px;
+  padding: 0 var(--content-edge) 2px;
   background: var(--bg);
   position: relative;
 }
@@ -202,8 +205,8 @@ button { font-variant-numeric: tabular-nums; }
   align-items: center;
   min-height: 41px;
   gap: 6px;
-  margin: 0 -6px 10px;
-  padding: 6px;
+  margin: 0 calc(-1 * var(--content-edge)) 10px;
+  padding: 6px var(--content-edge);
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg) 96%, transparent);
 }
@@ -329,17 +332,16 @@ select:focus-visible {
 
 .htmlPreview {
   display: block;
-  width: min(100%, 980px);
+  width: 100%;
   height: min(74vh, 920px);
-  margin: 0 auto;
+  margin: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #fff;
 }
 
 .planSurface {
-  max-width: 980px;
-  margin: 0 auto;
+  margin: 0;
   padding: 22px 26px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -399,7 +401,6 @@ select:focus-visible {
 }
 
 .planSurface p {
-  max-width: 72ch;
   color: var(--text);
   margin: 0 0 .65em;
   text-wrap: pretty;
@@ -606,8 +607,7 @@ pre code {
 .suggestion strong { color: var(--text); }
 
 .trail {
-  max-width: 980px;
-  margin: 0 auto 10px;
+  margin: 0 0 10px;
   border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
   background: var(--warning-muted);
 }
@@ -922,7 +922,6 @@ button.ghost.inline {
   .contentPane {
     grid-column: 1;
     height: auto;
-    padding: 0 6px 2px;
   }
   .contentToolbar {
     align-items: flex-start;

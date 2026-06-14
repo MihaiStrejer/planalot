@@ -20,6 +20,7 @@ import {
   type PlanFileEntry,
   type PlanSession,
   type PlanSummary,
+  type ResearchSession,
   type ServerEvent,
 } from "@planalot/shared";
 import "./styles.css";
@@ -31,6 +32,7 @@ import { RenderErrorContext, type RenderError } from "./render/RenderErrorContex
 import { RenderErrorPanel } from "./render/RenderErrorPanel";
 
 import { LeftRail } from "./toc/LeftRail";
+import { ResearchView } from "./research/ResearchView";
 import { useAnnotations } from "./annotation/useAnnotations";
 
 const token = new URLSearchParams(window.location.search).get("token") ?? "";
@@ -67,6 +69,8 @@ function App() {
   const [draft, setDraft] = useState("");
   const [files, setFiles] = useState<PlanFileEntry[]>([]);
   const [plans, setPlans] = useState<PlanSummary[]>([]);
+  const [research, setResearch] = useState<ResearchSession[]>([]);
+  const [selectedResearchId, setSelectedResearchId] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState(MAIN_PLAN_FILE);
   const [selectedContent, setSelectedContent] = useState("");
   const [leftWidth, setLeftWidth] = useState(() => storedPaneWidth("planalot:leftWidth", 220));
@@ -124,6 +128,8 @@ function App() {
       "session.status",
       "feedback.failed",
       "harness.presence",
+      "research.updated",
+      "research.inquiry.updated",
     ]) {
       source.addEventListener(name, update);
     }
@@ -142,6 +148,7 @@ function App() {
     setSelectedContent(nextSession.currentPlanText);
     await fetchFiles();
     await fetchPlans();
+    await fetchResearch();
     setError(null);
   }
 
@@ -159,9 +166,17 @@ function App() {
     setPlans(data.plans);
   }
 
+  async function fetchResearch() {
+    const response = await fetch(`/plans/${sessionId}/research?token=${encodeURIComponent(token)}`);
+    if (!response.ok) return;
+    const data = (await response.json()) as { research: ResearchSession[] };
+    setResearch(data.research);
+  }
+
   async function chooseFile(path: string) {
     selectedFileRef.current = path;
     setSelectedFile(path);
+    setSelectedResearchId(null);
     if (path === MAIN_PLAN_FILE && session) {
       setSelectedContent(session.currentPlanText);
       return;
@@ -181,6 +196,10 @@ function App() {
     window.location.assign(`/s/${planId}?token=${encodeURIComponent(token)}`);
   }
 
+  function chooseResearch(researchId: string) {
+    setSelectedResearchId(researchId);
+  }
+
   async function copyPlanId(planId: string) {
     await navigator.clipboard.writeText(planId);
     setCopiedPlanId(true);
@@ -190,6 +209,26 @@ function App() {
   function handleEvent(event: ServerEvent) {
     if (event.type === "feedback.failed") {
       setDelivery({ status: "failed", error: event.error });
+      return;
+    }
+    if (event.type === "research.updated") {
+      setResearch((current) => {
+        const index = current.findIndex((item) => item.id === event.research.id);
+        if (index === -1) return [...current, event.research];
+        const next = current.slice();
+        next[index] = event.research;
+        return next;
+      });
+      return;
+    }
+    if (event.type === "research.inquiry.updated") {
+      setResearch((current) =>
+        current.map((item) =>
+          item.id === event.researchId
+            ? { ...item, inquiries: item.inquiries.map((inquiry) => (inquiry.id === event.inquiry.id ? event.inquiry : inquiry)) }
+            : item
+        )
+      );
       return;
     }
     setError(null);
@@ -235,6 +274,10 @@ function App() {
   }
 
   const selectedEntry = useMemo(() => files.find((file) => file.path === selectedFile), [files, selectedFile]);
+  const selectedResearch = useMemo(
+    () => (selectedResearchId ? research.find((item) => item.id === selectedResearchId) ?? null : null),
+    [research, selectedResearchId],
+  );
   const selectedKind = selectedEntry?.type ?? "markdown";
   const blocks = useMemo(() => parseMarkdownBlocks(selectedContent), [selectedContent]);
   const pendingRequests = useMemo(
@@ -404,8 +447,11 @@ function App() {
           files={files}
           selectedFile={selectedFile}
           plans={plans}
+          research={research}
+          selectedResearchId={selectedResearchId}
           onFileSelect={(path) => void chooseFile(path)}
           onPlanSelect={choosePlan}
+          onResearchSelect={chooseResearch}
         />
       ) : null}
       {!leftCollapsed ? (
@@ -459,7 +505,9 @@ function App() {
         </div>
         {latestVersion?.modifications.length ? <ModificationTrail request={latestVersion} /> : null}
 
-        {selectedKind === "html" ? (
+        {selectedResearch ? (
+          <ResearchView session={selectedResearch} />
+        ) : selectedKind === "html" ? (
           <iframe className="htmlPreview" sandbox="" srcDoc={selectedContent} title={selectedFile} />
         ) : (
           <RenderErrorContext.Provider value={renderErrorApi}>
