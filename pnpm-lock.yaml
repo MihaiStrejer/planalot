@@ -65,10 +65,21 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.16)
+      tsx:
+        specifier: ^4.21.0
+        version: 4.22.4
 
-  packages/cc: {}
+  packages/cc:
+    dependencies:
+      '@planalot/extension-kit':
+        specifier: workspace:*
+        version: link:../extension-kit
 
-  packages/codex: {}
+  packages/codex:
+    dependencies:
+      '@planalot/extension-kit':
+        specifier: workspace:*
+        version: link:../extension-kit
 
   packages/daemon:
     dependencies:
@@ -92,9 +103,19 @@ importers:
         specifier: ^4.21.0
         version: 4.22.4
 
-  packages/pi: {}
+  packages/extension-kit: {}
 
-  packages/shared: {}
+  packages/pi:
+    dependencies:
+      '@planalot/extension-kit':
+        specifier: workspace:*
+        version: link:../extension-kit
+
+  packages/shared:
+    devDependencies:
+      tsx:
+        specifier: ^4.21.0
+        version: 4.22.4
 
 packages:
 

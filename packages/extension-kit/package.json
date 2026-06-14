@@ -1,5 +1,5 @@
 {
-  "name": "@planalot/codex",
+  "name": "@planalot/extension-kit",
   "version": "0.1.0",
   "private": true,
   "license": "Apache-2.0",
@@ -7,7 +7,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MihaiStrejer/planalot.git",
-    "directory": "packages/codex"
+    "directory": "packages/extension-kit"
   },
   "exports": {
     ".": {
@@ -18,8 +18,5 @@
   "scripts": {
     "build": "node -e \"fs.rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json"
-  },
-  "dependencies": {
-    "@planalot/extension-kit": "workspace:*"
   }
 }

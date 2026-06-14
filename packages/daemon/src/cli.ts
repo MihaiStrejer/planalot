@@ -6,7 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { checkCcExtension, installCcExtension } from "@planalot/cc";
 import { checkCodexExtension, installCodexExtension } from "@planalot/codex";
-import { installPiExtension } from "@planalot/pi";
+import { checkPiExtension, installPiExtension } from "@planalot/pi";
 import type {
   CreatePlanRequest,
   CreatePlanResponse,
@@ -19,6 +19,10 @@ import type {
 import { openBrowser } from "./browser.js";
 import { APP_VERSION, ensureDataDirs, harnessNamePath, harnessStatePath, readDaemonMetadata } from "./fsPaths.js";
 import { daemonLogPath, startDaemon } from "./server.js";
+
+/** Converge report shape returned by every harness install/check (from @planalot/extension-kit). */
+type ConvergeReport = Awaited<ReturnType<typeof installCcExtension>>;
+type ConvergeFn = (options: { cliPath: string; version: string }) => Promise<ConvergeReport>;
 
 async function main(): Promise<void> {
   const [, , commandOrPlan, maybePlan] = process.argv;
@@ -35,46 +39,34 @@ async function main(): Promise<void> {
 
   if (commandOrPlan === "install") {
     const cliPath = fileURLToPath(import.meta.url);
-    const force = process.argv.includes("--force");
     const check = process.argv.includes("--check");
     const json = process.argv.includes("--json");
+    // No --force: install is authoritative over the resources planalot owns. A
+    // stray --force is simply ignored.
 
-    if (maybePlan === "pi") {
-      const path = await installPiExtension({ cliPath, force });
-      console.log(`Installed Pi extension: ${path}`);
-      console.log("Restart Pi or run /reload to load Planalot.");
+    const harnesses: Record<string, { install: ConvergeFn; check: ConvergeFn; nextStep: string }> = {
+      cc: { install: installCcExtension, check: checkCcExtension, nextStep: "Use /planalot in Claude Code (restart it if the skills directory did not already exist)." },
+      "claude-code": { install: installCcExtension, check: checkCcExtension, nextStep: "Use /planalot in Claude Code (restart it if the skills directory did not already exist)." },
+      codex: { install: installCodexExtension, check: checkCodexExtension, nextStep: "Run `codex plugin add planalot@personal`, then start a new Codex thread to use $planalot." },
+      pi: { install: installPiExtension, check: checkPiExtension, nextStep: "Restart Pi or run /reload to load Planalot." },
+    };
+
+    const harness = maybePlan ? harnesses[maybePlan] : undefined;
+    if (!harness) {
+      throw new Error("Usage: planalot install <pi|cc|claude-code|codex> [--check] [--json]");
+    }
+
+    if (check) {
+      const report = await harness.check({ cliPath, version: APP_VERSION });
+      printConvergeReport(report, json);
+      process.exitCode = report.inSync ? 0 : 1;
       return;
     }
 
-    if (maybePlan === "cc" || maybePlan === "claude-code") {
-      if (check) {
-        const result = checkCcExtension({ version: APP_VERSION });
-        printCcCheckResult(result, json);
-        process.exitCode = result.inSync ? 0 : 1;
-        return;
-      }
-      const result = await installCcExtension({ cliPath, version: APP_VERSION, force });
-      console.log(`Installed Claude Code skill: ${result.skillPath}`);
-      if (result.legacyCommandUpdated) console.log(`Updated legacy Claude Code command fallback: ${result.commandPath}`);
-      console.log("Use /planalot in Claude Code. Restart Claude Code if the skills directory did not already exist.");
-      return;
-    }
-
-    if (maybePlan === "codex") {
-      if (check) {
-        const result = checkCodexExtension({ version: APP_VERSION });
-        printCodexCheckResult(result, json);
-        process.exitCode = result.inSync ? 0 : 1;
-        return;
-      }
-      const result = await installCodexExtension({ cliPath, version: APP_VERSION, force });
-      console.log(`Installed Codex plugin: ${result.pluginPath}`);
-      console.log(`Updated Codex personal marketplace: ${result.marketplacePath}`);
-      console.log("Run `codex plugin add planalot@personal`, then start a new Codex thread to use $planalot.");
-      return;
-    }
-
-    throw new Error("Usage: planalot install <pi|cc|claude-code|codex> [--force] [--check] [--json]");
+    const report = await harness.install({ cliPath, version: APP_VERSION });
+    printConvergeReport(report, json);
+    if (!json) console.log(harness.nextStep);
+    return;
   }
 
   if (commandOrPlan === "--version" || commandOrPlan === "-v") {
@@ -300,11 +292,102 @@ async function runPlanCommand(command: string, args: string[]): Promise<void> {
     return;
   }
 
+  if (command === "research-new") {
+    const planId = args[0];
+    const title = arg("--title");
+    if (!planId || !title) throw new Error("Usage: planalot research-new <planId> --title <title> [--scope-stdin] [--json]");
+    const scope = has("--scope-stdin") || has("--stdin") ? await readStdin() : arg("--scope");
+    printResult(await apiJson(daemon, `/plans/${encodeURIComponent(planId)}/research`, {
+      method: "POST",
+      body: { title, ...(scope !== undefined ? { scope } : {}) },
+    }), json);
+    return;
+  }
+
+  if (command === "research-list") {
+    const planId = requirePlanId(args, command);
+    printResult(await apiJson(daemon, `/plans/${encodeURIComponent(planId)}/research`), json);
+    return;
+  }
+
+  if (command === "research-show") {
+    const planId = args[0];
+    const rid = args[1];
+    if (!planId || !rid) throw new Error("Usage: planalot research-show <planId> <researchId> [--json]");
+    printResult(await apiJson(daemon, `/plans/${encodeURIComponent(planId)}/research/${encodeURIComponent(rid)}`), json);
+    return;
+  }
+
+  if (command === "research-add") {
+    const planId = args[0];
+    const rid = args[1];
+    if (!planId || !rid) throw new Error("Usage: planalot research-add <planId> <researchId> (--stdin | --title <t> [--detail <d>]) [--json]");
+    let inquiries: Array<{ title: string; detail?: string }>;
+    if (has("--stdin")) {
+      const parsed = JSON.parse(await readStdin()) as unknown;
+      const list = Array.isArray(parsed) ? parsed : (parsed as { inquiries?: unknown }).inquiries;
+      if (!Array.isArray(list)) throw new Error('research-add --stdin expects a JSON array of {title, detail?} (or {"inquiries":[...]})');
+      inquiries = list as Array<{ title: string; detail?: string }>;
+    } else {
+      const title = arg("--title");
+      if (!title) throw new Error("research-add requires --stdin or --title");
+      const detail = arg("--detail");
+      inquiries = [{ title, ...(detail ? { detail } : {}) }];
+    }
+    printResult(await apiJson(daemon, `/plans/${encodeURIComponent(planId)}/research/${encodeURIComponent(rid)}/inquiries`, {
+      method: "POST",
+      body: { inquiries },
+    }), json);
+    return;
+  }
+
+  if (command === "research-update") {
+    const planId = args[0];
+    const rid = args[1];
+    const iid = args[2];
+    if (!planId || !rid || !iid) {
+      throw new Error("Usage: planalot research-update <planId> <researchId> <inquiryId> [--status <s>] [--assignee <a>] [--title <t>] [--detail <d>] [--result-stdin] [--json]");
+    }
+    const result = has("--result-stdin") ? await readStdin() : arg("--result");
+    const body = {
+      ...(arg("--status") ? { status: arg("--status") } : {}),
+      ...(arg("--assignee") ? { assignee: arg("--assignee") } : {}),
+      ...(arg("--title") ? { title: arg("--title") } : {}),
+      ...(arg("--detail") ? { detail: arg("--detail") } : {}),
+      ...(result !== undefined ? { result } : {}),
+    };
+    if (Object.keys(body).length === 0) {
+      throw new Error("research-update needs at least one of --status/--assignee/--title/--detail/--result-stdin");
+    }
+    printResult(await apiJson(daemon, `/plans/${encodeURIComponent(planId)}/research/${encodeURIComponent(rid)}/inquiries/${encodeURIComponent(iid)}`, {
+      method: "PATCH",
+      body,
+    }), json);
+    return;
+  }
+
+  if (command === "research-scope") {
+    const planId = args[0];
+    const rid = args[1];
+    if (!planId || !rid || !has("--stdin")) throw new Error("Usage: planalot research-scope <planId> <researchId> --stdin [--json]");
+    const scope = await readStdin();
+    printResult(await apiJson(daemon, `/plans/${encodeURIComponent(planId)}/research/${encodeURIComponent(rid)}/scope`, {
+      method: "PUT",
+      body: { scope },
+    }), json);
+    return;
+  }
+
   if (command === "attach") {
     const planId = args[0];
-    if (!planId) throw new Error("Usage: planalot attach <planId> [--drive] [--name <text>] [--type <runtime>] [--harness-id <id>]");
+    if (!planId) throw new Error("Usage: planalot attach <planId> [--drive] [--name <text>] [--type <runtime>] [--harness-id <id>] [--exit-on-feedback]");
     const harnessType = arg("--type") ?? runtimeFromEnv();
     const drive = has("--drive");
+    // Exit cleanly (without detaching) the moment an actionable event arrives,
+    // so a harness whose runtime only re-invokes the agent on process exit
+    // (e.g. Claude Code background tasks) is woken to handle it. Presence churn
+    // (harness.presence) is suppressed and never counts as actionable.
+    const exitOnFeedback = has("--exit-on-feedback");
     const cwd = process.cwd();
     // Name precedence: explicit --name/--label → this plan's stored name →
     // this cwd's stored name → (omit, let the server assign a friendly one).
@@ -363,7 +446,19 @@ async function runPlanCommand(command: string, args: string[]): Promise<void> {
           body: { cursor, waitMs: 25_000 },
         });
         cursor = hb.cursor;
-        for (const event of hb.events) emitLine(event);
+        let woke = false;
+        for (const event of hb.events) {
+          // In exit-on-feedback mode, presence churn is noise — drop it and keep
+          // heartbeating. Any other targeted event (feedback.sent, feedback.answered,
+          // plan.build, plan.accepted, implementation.requested) is something the
+          // agent must act on: print it and exit so the runtime re-invokes the agent.
+          if (exitOnFeedback && (event as { type?: string }).type === "harness.presence") continue;
+          emitLine(event);
+          if (exitOnFeedback) woke = true;
+        }
+        // Clean exit (no detach): the harness stays registered for presence and is
+        // resumed by the next attach, which replays anything queued in the gap.
+        if (woke) return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.startsWith("404")) {
@@ -408,66 +503,34 @@ async function runPlanCommand(command: string, args: string[]): Promise<void> {
 }
 
 function printHelp(): void {
-  console.log(`planalot ${APP_VERSION}\n\nUsage:\n  Create a plan workspace (returns a plan id):\n    planalot create --name <name> [--json]\n    planalot import <path> --name <name> [--json]\n    planalot [PLAN.md]    shortcut: import a markdown file into a new plan workspace and open it\n\n  Work with a plan by id:\n    planalot find <query> [--status planning] [--include-expired] [--json]\n    planalot open <planId>\n    planalot show <planId> [--json]\n    planalot files <planId> [--json]\n    planalot read <planId> <requirements/file.md|design/file.md|tasks/file.md|--all> [--json]\n    planalot write <planId> <requirements/file.md|design/file.md|tasks/file.md> --stdin\n    planalot add-file <planId> <requirements/file.md|design/file.md|tasks/file.md|file.html> --purpose <text> --stdin\n    planalot status <planId> <planning|implementing|done|canceled>\n    planalot implement <planId> [--target-harness-id <id>] [--allow-open-feedback]\n\n  Feedback:\n    planalot feedback <planId> [--open] [--json]\n    planalot add-feedback <planId> --text <text> [--file <path>] [--json]\n    planalot wait-feedback <planId> [--timeout <seconds>] [--json]\n    planalot feedback-result <planId> --stdin [--harness-id <id>] [--json]\n    planalot resolve-feedback <planId> <feedbackId> [--note <text>]\n\n  Harness / daemon:\n    planalot attach <planId> [--drive] [--name <text>] [--type <runtime>] [--harness-id <id>]\n    planalot detach <planId> [--harness-id <id>]\n    planalot daemon\n    planalot install pi|cc|codex [--force]\n    planalot install cc|codex --check [--json]\n\nPlans live in ~/.planalot/plans/<id>. create/import (and the 'planalot PLAN.md' shortcut) mint a\nnew plan id; from then on Planalot owns the source of truth and you work by id - open/show/read/\nwrite/implement <planId>. 'planalot PLAN.md' imports the file once; it does not keep syncing a file by name.\n\nattach is long-running: it registers this harness (heartbeat + receive) and prints\nfeedback events as JSON lines until stopped. Run it in the background while planning.`);
+  console.log(`planalot ${APP_VERSION}\n\nUsage:\n  Create a plan workspace (returns a plan id):\n    planalot create --name <name> [--json]\n    planalot import <path> --name <name> [--json]\n    planalot [PLAN.md]    shortcut: import a markdown file into a new plan workspace and open it\n\n  Work with a plan by id:\n    planalot find <query> [--status planning] [--include-expired] [--json]\n    planalot open <planId>\n    planalot show <planId> [--json]\n    planalot files <planId> [--json]\n    planalot read <planId> <requirements/file.md|design/file.md|tasks/file.md|--all> [--json]\n    planalot write <planId> <requirements/file.md|design/file.md|tasks/file.md> --stdin\n    planalot add-file <planId> <requirements/file.md|design/file.md|tasks/file.md|file.html> --purpose <text> --stdin\n    planalot status <planId> <planning|implementing|done|canceled>\n    planalot implement <planId> [--target-harness-id <id>] [--allow-open-feedback]\n\n  Research (lease-exempt parallel inquiries):\n    planalot research-new <planId> --title <t> [--scope-stdin]\n    planalot research-list <planId> [--json]\n    planalot research-show <planId> <researchId> [--json]\n    planalot research-add <planId> <researchId> (--stdin <JSON array of {title,detail?}> | --title <t> [--detail <d>])\n    planalot research-update <planId> <researchId> <inquiryId> [--status open|active|blocked|resolved|dropped] [--assignee <a>] [--result-stdin]\n    planalot research-scope <planId> <researchId> --stdin\n\n  Feedback:\n    planalot feedback <planId> [--open] [--json]\n    planalot add-feedback <planId> --text <text> [--file <path>] [--json]\n    planalot wait-feedback <planId> [--timeout <seconds>] [--json]\n    planalot feedback-result <planId> --stdin [--harness-id <id>] [--json]\n    planalot resolve-feedback <planId> <feedbackId> [--note <text>]\n\n  Harness / daemon:\n    planalot attach <planId> [--drive] [--name <text>] [--type <runtime>] [--harness-id <id>] [--exit-on-feedback]\n    planalot detach <planId> [--harness-id <id>]\n    planalot daemon\n    planalot install <pi|cc|codex> [--check] [--json]   (install = update + repair + report; --check is a dry run)\n\nPlans live in ~/.planalot/plans/<id>. create/import (and the 'planalot PLAN.md' shortcut) mint a\nnew plan id; from then on Planalot owns the source of truth and you work by id - open/show/read/\nwrite/implement <planId>. 'planalot PLAN.md' imports the file once; it does not keep syncing a file by name.\n\nattach is long-running: it registers this harness (heartbeat + receive) and prints\nfeedback events as JSON lines until stopped. Run it in the background while planning.\nWith --exit-on-feedback it instead exits (staying registered) the moment an actionable\nevent arrives, so a runtime that only re-invokes the agent on process exit (e.g. Claude\nCode background tasks) is woken; relaunch it after handling the event.`);
 }
 
-function printCcCheckResult(
-  result: ReturnType<typeof checkCcExtension>,
-  json: boolean,
-): void {
+function printConvergeReport(report: ConvergeReport, json: boolean): void {
   if (json) {
-    printResult(result, true);
+    console.log(JSON.stringify(report, null, 2));
     return;
   }
 
-  console.log(`Planalot local version: ${result.localVersion}`);
-  console.log(`Claude Code skill: ${formatCcProbe(result.skill)}`);
-  console.log(`Claude Code legacy command: ${formatCcProbe(result.legacyCommand)}`);
+  const verb: Record<string, string> = report.mode === "check"
+    ? { wrote: "would create", updated: "would update", unchanged: "ok", removed: "would remove", absent: "ok (absent)", "left-foreign": "left (not ours)" }
+    : { wrote: "created", updated: "updated", unchanged: "unchanged", removed: "removed", absent: "absent", "left-foreign": "left (not ours)" };
 
-  if (result.inSync) {
-    console.log("Claude Code skill version is in sync.");
-    return;
+  console.log(`planalot install ${report.harness} — v${report.version} (${report.mode})`);
+  for (const step of report.steps) {
+    console.log(`  ${verb[step.action] ?? step.action}  ${step.path}${step.note ? `  — ${step.note}` : ""}`);
   }
-
-  console.log("Claude Code skill is out of sync:");
-  for (const problem of result.problems) console.log(`- ${problem}`);
-}
-
-function formatCcProbe(probe: ReturnType<typeof checkCcExtension>["skill"]): string {
-  if (!probe.exists) return `${probe.path} (missing)`;
-  const generated = probe.generated ? "generated" : "not generated by Planalot";
-  return `${probe.path} (${generated}, version ${probe.skillVersion ?? "missing"}, revision ${probe.skillRevision ?? "missing"})`;
-}
-
-function printCodexCheckResult(
-  result: ReturnType<typeof checkCodexExtension>,
-  json: boolean,
-): void {
-  if (json) {
-    printResult(result, true);
-    return;
+  // Advisory only — codex runs from its own cache, which the installer can't write.
+  // Never affects the in-sync verdict below.
+  if (report.drift.length > 0) {
+    console.log("  Reload needed (the harness runs its own cached copy, not our files):");
+    for (const drift of report.drift) console.log(`    • ${drift.path} — ${drift.reason}`);
   }
-
-  console.log(`Planalot local version: ${result.localVersion}`);
-  console.log(`Codex plugin source: ${formatCodexProbe(result.source)}`);
-  if (result.cache.length === 0) {
-    console.log("Codex plugin cache: missing");
+  if (report.mode === "check") {
+    console.log(report.inSync ? "in sync" : "out of sync");
   } else {
-    for (const probe of result.cache) console.log(`Codex plugin cache: ${formatCodexProbe(probe)}`);
+    console.log(report.inSync ? "already up to date" : "done");
   }
-
-  if (result.inSync) {
-    console.log("Codex plugin and skill versions are in sync.");
-    return;
-  }
-
-  console.log("Codex plugin and skill versions are out of sync:");
-  for (const problem of result.problems) console.log(`- ${problem}`);
-}
-
-function formatCodexProbe(probe: ReturnType<typeof checkCodexExtension>["source"]): string {
-  if (!probe.exists) return `${probe.path} (missing)`;
-  return `${probe.path} (manifest ${probe.manifestVersion ?? "missing"}, skill ${probe.skillVersion ?? "missing"}, revision ${probe.skillRevision ?? "missing"})`;
 }
 
 function runtimeFromEnv(): "codex" | "pi" | "claude-code" | "manual" {
@@ -537,6 +600,12 @@ function isPlanCommand(command: string | undefined): command is string {
     "feedback-result",
     "resolve-feedback",
     "implement",
+    "research-new",
+    "research-list",
+    "research-show",
+    "research-add",
+    "research-update",
+    "research-scope",
     "attach",
     "detach",
     "status",
@@ -590,7 +659,11 @@ async function readStdin(): Promise<string> {
   for await (const chunk of process.stdin) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  return Buffer.concat(chunks).toString("utf8");
+  const text = Buffer.concat(chunks).toString("utf8");
+  // Strip a leading UTF-8 BOM — Windows shells (PowerShell) prepend one when
+  // piping to a child's stdin, which otherwise breaks JSON.parse and leaks into
+  // stored file/scope content.
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
 interface HarnessState {
