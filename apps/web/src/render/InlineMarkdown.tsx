@@ -25,14 +25,24 @@ const TOKENS: Array<{
   render: (match: RegExpExecArray, key: number) => React.ReactNode;
 }> = [
   {
-    // **bold** or __bold__
-    re: /\*\*(.+?)\*\*|__(.+?)__/,
-    render: (m, key) => <strong key={key}>{m[1] ?? m[2]}</strong>,
+    // **bold** (asterisks may open/close intraword, per CommonMark)
+    re: /\*\*(.+?)\*\*/,
+    render: (m, key) => <strong key={key}>{m[1]}</strong>,
   },
   {
-    // *italic* or _italic_ (not preceded by another * or _)
-    re: /\*(.+?)\*|_(.+?)_/,
-    render: (m, key) => <em key={key}>{m[1] ?? m[2]}</em>,
+    // __bold__ (underscores only at word boundaries, so foo__bar__ stays literal)
+    re: /(?<!\w)__(.+?)__(?!\w)/,
+    render: (m, key) => <strong key={key}>{m[1]}</strong>,
+  },
+  {
+    // *italic* (asterisks may open/close intraword)
+    re: /\*(.+?)\*/,
+    render: (m, key) => <em key={key}>{m[1]}</em>,
+  },
+  {
+    // _italic_ (underscores only at word boundaries, so some_var_name stays literal)
+    re: /(?<!\w)_(.+?)_(?!\w)/,
+    render: (m, key) => <em key={key}>{m[1]}</em>,
   },
   {
     // `inline code`

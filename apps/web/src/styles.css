@@ -444,6 +444,27 @@ select:focus-visible {
   color: inherit;
 }
 
+[data-block-type="table"] table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 8px 0;
+  font-size: .95em;
+}
+
+[data-block-type="table"] th,
+[data-block-type="table"] td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  color: var(--text);
+}
+
+[data-block-type="table"] th {
+  font-weight: 650;
+  background: var(--surface-muted);
+}
+
 hr {
   border: 0;
   border-top: 1px solid var(--border);

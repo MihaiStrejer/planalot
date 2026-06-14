@@ -54,6 +54,7 @@ export const blockRegistry: Record<MarkdownBlock["type"], React.FC<BlockProps>> 
   code: () => null,
   hr: () => null,
   blockquote: () => null,
+  table: () => null,
 };
 
 /**

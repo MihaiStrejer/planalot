@@ -22,6 +22,7 @@ import { Paragraph } from "./blocks/Paragraph";
 import { ListItem } from "./blocks/ListItem";
 import { Blockquote } from "./blocks/Blockquote";
 import { Hr } from "./blocks/Hr";
+import { Table } from "./blocks/Table";
 import { CodeBlock } from "./blocks/CodeBlock";
 import { HighlightedCode } from "./blocks/HighlightedCode";
 import { MermaidBlock } from "./blocks/MermaidBlock";
@@ -32,6 +33,7 @@ registerBlock("paragraph", Paragraph);
 registerBlock("list-item", ListItem);
 registerBlock("blockquote", Blockquote);
 registerBlock("hr", Hr);
+registerBlock("table", Table);
 registerBlock("code", CodeBlock);
 
 // Register code-language renderers.

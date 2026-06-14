@@ -458,7 +458,7 @@ export type ServerEvent =
 
 export interface MarkdownBlock {
   id: string;
-  type: "heading" | "paragraph" | "list-item" | "code" | "hr" | "blockquote";
+  type: "heading" | "paragraph" | "list-item" | "code" | "hr" | "blockquote" | "table";
   content: string;
   level?: number;
   startLine: number;
@@ -560,6 +560,81 @@ const matchBlockquote: Matcher = (lines, i) => {
   };
 };
 
+// ---------------------------------------------------------------------------
+// GFM tables
+// ---------------------------------------------------------------------------
+
+/**
+ * Split one table row into trimmed cells. Strips one leading and one trailing
+ * "|" (the outer pipes) if present, then splits on "|". Shared by the parser's
+ * delimiter check and the renderer.
+ *
+ * Known limitation: an escaped pipe ("\|") inside a cell is NOT honoured — it is
+ * treated as a cell separator. Wrap a literal pipe in backticks to keep it.
+ */
+export function splitTableCells(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((cell) => cell.trim());
+}
+
+// A delimiter row is `| --- | :--: | --: |` etc: >= 1 cell, every cell `:?-+:?`.
+function isDelimiterRow(line: string): boolean {
+  const cells = splitTableCells(line);
+  return cells.length >= 1 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+// GFM table — a header row, a delimiter row, then zero or more body rows.
+// Stores the RAW table text in `content`; the renderer parses cells.
+const matchTable: Matcher = (lines, i) => {
+  const header = lines[i] ?? "";
+  if (header.trim() === "" || !header.includes("|")) return null;
+  const delimiter = lines[i + 1];
+  if (delimiter === undefined || !isDelimiterRow(delimiter)) return null;
+  // Header and delimiter must agree on column count, else it's a normal paragraph.
+  if (splitTableCells(header).length !== splitTableCells(delimiter).length) return null;
+
+  const tableLines = [header, delimiter];
+  let j = i + 2;
+  while (j < lines.length) {
+    const line = lines[j] ?? "";
+    if (line.trim() === "" || !line.includes("|")) break;
+    tableLines.push(line);
+    j += 1;
+  }
+  // NOTE: a list-item line that contains "|" and is immediately followed by a
+  // delimiter row binds here as a table (matchTable runs before matchListItem).
+  // This mirrors GFM precedence and is extremely rare in real plan markdown.
+  return {
+    block: { type: "table", content: tableLines.join("\n"), startLine: i + 1 },
+    consumed: j - i,
+  };
+};
+
+// Matchers that begin a block other than a list item. Reused (not duplicated)
+// by the list-item continuation check so a continuation line never swallows a
+// following heading / hr / code fence / blockquote / table.
+const NOOP_ID = () => "";
+const BLOCK_START_MATCHERS: readonly Matcher[] = [
+  matchCodeFence,
+  matchHeading,
+  matchHr,
+  matchBlockquote,
+  matchTable,
+];
+
+// Is line `j` a lazy continuation of the current list item? True when it is
+// non-blank, is not itself a list marker (so nested/sibling items stay separate),
+// and does not start another block kind.
+const isListContinuation = (lines: string[], j: number): boolean => {
+  const line = lines[j] ?? "";
+  if (line.trim() === "") return false;
+  const t = line.trimStart();
+  if (/^[-*+]\s+/.test(t) || /^\d+\.\s+/.test(t)) return false;
+  return !BLOCK_START_MATCHERS.some((m) => m(lines, j, NOOP_ID) !== null);
+};
+
 // List items — bullet (- * +) or ordered (1.), with indent nesting + checkbox
 const matchListItem: Matcher = (lines, i) => {
   const raw = lines[i] ?? "";
@@ -594,6 +669,15 @@ const matchListItem: Matcher = (lines, i) => {
     content = content.slice(4);
   }
 
+  // Absorb lazy continuation lines (wrapped text) into the same item, joined
+  // with a space — the item is one logical inline paragraph and the renderer is
+  // inline, so this wraps cleanly.
+  let j = i + 1;
+  while (j < lines.length && isListContinuation(lines, j)) {
+    content = `${content} ${(lines[j] ?? "").trim()}`;
+    j += 1;
+  }
+
   return {
     block: {
       type: "list-item",
@@ -603,7 +687,7 @@ const matchListItem: Matcher = (lines, i) => {
       ...(checked !== undefined ? { checked } : {}),
       startLine: i + 1,
     },
-    consumed: 1,
+    consumed: j - i,
   };
 };
 
@@ -613,6 +697,7 @@ const MATCHERS: readonly Matcher[] = [
   matchHeading,
   matchHr,
   matchBlockquote,
+  matchTable,
   matchListItem,
 ];
 
